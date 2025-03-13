@@ -1,0 +1,543 @@
+-- Segment 1: Core Event Fact Selection
+WITH EventFact AS (
+  SELECT
+    ef.EVENTNAME,
+    ef.NUMCUSTDEENERGIZED,
+    ef.TROUBLE_LVL,
+    ef.DEVICENAME,
+    ef.FEEDERNAME,
+    ef.STARTDATETIME,
+    ef.RESTOREDDATETIME,
+    ef.DURATIONMIN,
+    ef.DURATIONHM,
+    ef.CMI,
+    ef.BUILD_TYPE,
+    ef.SUBSTATIONNAME,
+    ef.SERVICECENTER,
+    ef.operatorcomments,
+    ef.eventkey,
+    ef.causekey
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_EVENT_FACT` ef
+  WHERE ef.STARTDATETIME BETWEEN DATETIME("2024-12-19") AND DATETIME_ADD("2024-12-31", INTERVAL 1 DAY)
+    AND ef.EXCLUDETROUBLEFLAG = 0
+    AND ef.MOMENTARYOUTAGEFLAG = 0
+    AND ef.CANCELLEDFLAG = 0
+    AND ef.PLANNEDOTGFLAG = 0
+    AND ef.NONOUTGCALLFLAG = 0
+    AND ef.ORPHANOUTAGEFLAG = 0
+    AND ef.SERVICECENTER NOT IN ('BV', 'EV', 'FB', 'MV', 'RP')
+    AND ef.FEEDERNAME != '-Missing Feeder-'
+),
+
+-- Segment 2: AMI Data Consolidation
+AMI_Data AS (
+  SELECT 
+    EVENTNAME,
+    COUNTIF(MATCH = "True_Match") AS True_Match_Count,
+    COUNTIF(MATCH = "Partial_Match_Pons") AS Partial_Match_PON_Count,
+    COUNTIF(MATCH = "Partial_Match_Prns") AS Partial_Match_PRN_Count
+  FROM (
+    SELECT *,
+      ROW_NUMBER() OVER (PARTITION BY EVENTNAME, METERNAME ORDER BY AMI_INSERT_TS DESC) AS AMI_INSERT_TS_Order
+    FROM `smart-meter-production.RELIABILITY.T_FP_AMI_OUTAGES`
+    WHERE ACTUALPERIODSTART BETWEEN DATETIME("2024-12-19") AND DATETIME_ADD("2024-12-31", INTERVAL 1 DAY)
+      AND LPE_MATCH = "No_Match_LPE"
+  )
+  WHERE AMI_INSERT_TS_Order = 1
+  GROUP BY EVENTNAME
+),
+
+-- Segment 3: Operator Actions
+OperatorData AS (
+  SELECT 
+    eventname,
+    MAX(CASE WHEN new_value LIKE '%OUTAGE_STATUS_CHANGE; Status:CREATED%' THEN OPERATOR_ID END) AS OPID_OPERATOR_ID,
+    MAX(CASE WHEN new_value LIKE '%OUTAGE_STATUS_CHANGE; Status:Restored%' THEN OPERATOR_ID END) AS OPID2_OPERATOR_ID
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_GAP_AUDIT_LOG`
+  GROUP BY eventname
+),
+
+-- Segment 4: OEP Data
+OEP_Data AS (
+  SELECT 
+    OutageID AS EVENTNAME,
+    MAX(OutageDetails.ponCount) AS ponCount
+  FROM `cnp-datafoundation-prod.ADMS_OEP.T_OEP_MESSAGES`
+  WHERE createdDateTime BETWEEN DATETIME("2024-12-19") AND DATETIME_ADD("2024-12-31", INTERVAL 1 DAY)
+  GROUP BY OutageID
+),
+
+-- Segment 5: Supplemental Data
+SupplementalData AS (
+  SELECT
+    ef.EVENTNAME,
+    cd.CAUSECODE,
+    omsat.ACTION_TAKEN,
+    ss.referred_reason_notes,
+    gnc.phase,
+    gnc.Hazard_Level_Code,
+    CF.Number_OF_LS_Calls,
+    OEP.ponCount
+  FROM EventFact ef
+  LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_CAUSE_DIM` cd 
+    ON ef.causekey = cd.causekey
+  LEFT JOIN (
+    SELECT eventname, STRING_AGG(action_taken_name, ' , ') AS ACTION_TAKEN
+    FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_ALL_ACTIONS_TAKEN`
+    GROUP BY eventname
+  ) omsat ON ef.EVENTNAME = omsat.eventname
+  LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_SERVICE_SUITE` ss 
+    ON ef.EVENTNAME = ss.eventname
+  LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_GAP_NEW_COLS` gnc 
+    ON ef.EVENTNAME = gnc.eventname
+  LEFT JOIN (
+    SELECT eventkey, COUNT(CALLCODE) AS Number_OF_LS_Calls
+    FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_CALL_FACT`
+    WHERE CALLCODE = 'LS-Lights Out'
+    GROUP BY eventkey
+  ) CF ON ef.eventkey = CF.eventkey
+  LEFT JOIN OEP_Data OEP ON ef.EVENTNAME = OEP.EVENTNAME
+)
+
+-- Main Query
+SELECT DISTINCT
+  ef.EVENTNAME,
+  ef.NUMCUSTDEENERGIZED,
+  CASE
+    WHEN ef.TROUBLE_LVL = 'T' THEN 'NESTED_OUTAGE_TF'
+    WHEN ef.TROUBLE_LVL = 'F' THEN 'NESTED_OUTAGE_F'
+    WHEN ef.TROUBLE_LVL = 'L' THEN 'NESTED_OUTAGE_L'
+    ELSE 'Null' 
+  END AS NESTED_OUTAGE,
+  ef.TROUBLE_LVL,
+  FORMAT("""
+    [ Number_of_Meters ]: %d
+    [ True_Match_Count ]: %d
+    [ Partial_Match_PON_Count ]: %d
+    [ Partial_Match_PRN_Count ]: %d
+    [ ~ Total_PON_Count ]: %s
+  """, 
+  CAST(ef.NUMCUSTDEENERGIZED AS INT64),
+  CAST(COALESCE(AMI.True_Match_Count, 0) AS INT64),
+  CAST(COALESCE(AMI.Partial_Match_PON_Count, 0) AS INT64),
+  CAST(COALESCE(AMI.Partial_Match_PRN_Count, 0) AS INT64),
+  COALESCE(CAST(sd.ponCount AS STRING), '0')) AS METER_STATS,
+  ef.DEVICENAME,
+  ef.FEEDERNAME,
+  FORMAT("""
+    [ Start Date Time ]: %t
+    [ Restore Date Time ]: %t
+    [ Duration ]: %s
+    [ CMI ]: %s
+  """, 
+  ef.STARTDATETIME, 
+  ef.RESTOREDDATETIME,
+  ef.DURATIONHM,
+  CAST(ef.CMI AS STRING)) AS EVENT_TIMES,
+  FORMAT("""
+    [ Created BY ]: %s
+    [ Restored BY ]: %s
+    [ Phase ]: %s
+    [ Hazard Level]: %s
+    [ Number_Of_LS_Calls]: %d
+    [ Referral Notes ]: %s
+    [ Comments ]: %s
+    [ Cause Code ]: %s
+    [ Action Taken ]: %s
+  """,
+  COALESCE(op.OPID_OPERATOR_ID, ' '),
+  COALESCE(op.OPID2_OPERATOR_ID, ' '),
+  COALESCE(sd.phase, ' '),
+  COALESCE(CAST(sd.Hazard_Level_Code AS STRING), '0'),
+  CAST(COALESCE(sd.Number_OF_LS_Calls, 0) AS INT64),
+  COALESCE(sd.referred_reason_notes, ' '),
+  COALESCE(ef.operatorcomments, ' '),
+  COALESCE(sd.CAUSECODE, ' '),
+  COALESCE(sd.ACTION_TAKEN, ' ')) AS DETAILS,
+  CASE
+    WHEN op.OPID2_OPERATOR_ID NOT LIKE '0%'
+    AND op.OPID2_OPERATOR_ID NOT IN ('SUBSTATION', 'AMS', 'SCADA', 'SUBSTATIONC', 'ABB ENGINE')
+    THEN 'Controller Restored Event'
+    ELSE op.OPID2_OPERATOR_ID
+  END AS Restored_By,
+  ef.STARTDATETIME,
+  ef.RESTOREDDATETIME,
+  ef.SUBSTATIONNAME,
+  ef.SERVICECENTER,
+  ef.DURATIONMIN,
+  ef.CMI,
+  ef.BUILD_TYPE
+FROM EventFact ef
+JOIN AMI_Data AMI ON ef.EVENTNAME = AMI.EVENTNAME
+JOIN OperatorData op ON ef.EVENTNAME = op.eventname
+JOIN SupplementalData sd ON ef.EVENTNAME = sd.EVENTNAME
+WHERE ef.TROUBLE_LVL IN ('T', 'F', 'L')
+  AND op.OPID_OPERATOR_ID = 'ABB ENGINE'
+  AND COALESCE(sd.Number_OF_LS_Calls, 0) >= 1
+  AND COALESCE(AMI.Partial_Match_PRN_Count, 0) > 0
+  AND COALESCE(AMI.True_Match_Count, 0) = 0
+  AND COALESCE(AMI.Partial_Match_PON_Count, 0) = 0
+  AND (op.OPID2_OPERATOR_ID LIKE '0%' 
+       OR op.OPID2_OPERATOR_ID IN ('SUBSTATION', 'AMS', 'SCADA', 'SUBSTATIONC', 'ABB ENGINE'))
+  AND COALESCE(sd.ACTION_TAKEN, '') NOT LIKE '%7%%%'
+ORDER BY ef.FEEDERNAME, ef.STARTDATETIME;
+
+
+-----------------------------------------------------------------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------------------------------------------------------------------
+Original Code
+------------------------------------------------------------------------------------------------------------------------------------------------------
+select distinct
+ef.EVENTNAME,
+ef.NUMCUSTDEENERGIZED,
+ 
+Case
+      when ef.trouble_lvl in ('T')
+      and OPID.OPERATOR_ID = 'ABB ENGINE'
+      and Number_OF_LS_Calls >= 1
+      and AMI2.MATCH ='Partial_Match_Prns'
+      and AMI2.Partial_Match_PRN_Count is not null -- should i add "no PONs"
+      and ifnull(True_Match_Count,0) = 0
+      and ifnull(Partial_Match_PON_Count,0) = 0
+      and (OPID2.OPERATOR_ID LIKE '0%'
+      or OPID2.OPERATOR_ID IN ('SUBSTATION', 'AMS', 'SCADA', 'SUBSTATIONC', 'ABB ENGINE'))
+      and omsat.ACTION_TAKEN not like '%7%%%'
+      Then 'NESTED_OUTAGE_TF'
+      when ef.trouble_lvl in ('F')
+      and OPID.OPERATOR_ID = 'ABB ENGINE'
+      and Number_OF_LS_Calls >= 1
+      and AMI2.MATCH ='Partial_Match_Prns'
+      and AMI2.Partial_Match_PRN_Count is not null -- should i add "no PONs"
+      and ifnull(True_Match_Count,0) = 0
+      and ifnull(Partial_Match_PON_Count,0) = 0
+      and (OPID2.OPERATOR_ID LIKE '0%'
+      or OPID2.OPERATOR_ID IN ('SUBSTATION', 'AMS', 'SCADA', 'SUBSTATIONC', 'ABB ENGINE'))
+      and omsat.ACTION_TAKEN not like '%7%%%'
+      Then 'NESTED_OUTAGE_F'
+      when ef.trouble_lvl in ('L')
+      and OPID.OPERATOR_ID = 'ABB ENGINE'
+      and Number_OF_LS_Calls >= 1
+      and AMI2.MATCH ='Partial_Match_Prns'
+      and AMI2.Partial_Match_PRN_Count is not null -- should i add "no PONs"
+      and ifnull(True_Match_Count,0) = 0
+      and ifnull(Partial_Match_PON_Count,0) = 0
+      and (OPID2.OPERATOR_ID LIKE '0%'
+      or OPID2.OPERATOR_ID IN ('SUBSTATION', 'AMS', 'SCADA', 'SUBSTATIONC', 'ABB ENGINE'))
+      and omsat.ACTION_TAKEN not like '%7%%%'
+      Then 'NESTED_OUTAGE_L'
+      Else 'Null'
+      End as NESTED_OUTAGE,
+ 
+-- Case
+--     when ef.trouble_lvl in ('T', 'F')
+--       and (OPID.OPERATOR_ID LIKE '0%'
+--       or OPID.OPERATOR_ID IN ('SUBSTATION', 'AMS', 'SCADA', 'SUBSTATIONC', 'ABB ENGINE'))
+--       and (ifnull(Partial_Match_PON_Count,0)) / (ef.numcustdeenergized+1) > 0.8
+--       and OPID2.OPERATOR_ID NOT LIKE '0%'
+--       and OPID2.OPERATOR_ID NOT IN ('SUBSTATION', 'AMS', 'SCADA', 'SUBSTATIONC', 'ABB ENGINE')
+--       and (omsat.ACTION_TAKEN like '7%%'
+--       or omsat.ACTION_TAKEN like '6%%')
+--       Then 'Yes'
+--       Else 'Null'
+--       End as Potentially_Related_To_Nested_Outage_DCO,
+ 
+ef.TROUBLE_LVL,
+ 
+('[ Number_of_Meters ]: '
+||ef.numcustdeenergized || chr(13) || chr(10)
+|| chr(13) || chr(10)
+||'[ True_Match_Count ]: '
+||ifnull(True_Match_Count,0) ||chr(13) || chr(10)
+||chr(13) || chr(10)
+|| '[ Partial_Match_PON_Count ]: '
+||ifnull(Partial_Match_PON_Count,0) ||chr(13) || chr(10)
+||chr(13) || chr(10)
+|| '[ Partial_Match_PRN_Count ]: '
+||ifnull(Partial_Match_PRN_Count,0) ||chr(13) || chr(10)
+||chr(13) || chr(10)
+|| '[ ~ Total_PON_Count ]: '
+|| ifnull(ponCount, '0')
+)
+as METER_STATS,
+ 
+ef.DEVICENAME,
+ef.FEEDERNAME,
+ 
+('[ Start Date Time ]: '  
+|| ef.startdatetime || chr(13) || chr(10)
+|| chr(13) || chr(10)
+||'[ Restore Date Time ]: '
+|| ef.restoreddatetime || chr(13) || chr(10)
+|| chr(13) || chr(10)
+||'[ Duration ]: '
+|| ef.DURATIONHM || chr(13) || chr(10)
+|| chr(13) || chr(10)
+||'[ Duration ]: '
+|| ef.CMI
+) AS EVENT_TIMES,
+ 
+    ( '[ Created BY ]: '
+      || ifnull(OPID.OPERATOR_ID,' ') || chr(13) || chr(10)
+      ||'[ Restored BY ]: '
+      || ifnull(OPID2.OPERATOR_ID,' ') || chr(13) || chr(10)
+      ||'[ Phase ]: '
+      || ifnull(gnc.phase,' ') || chr(13) || chr(10)
+      || '[ Hazard Level]: '      
+      || ifnull(gnc.Hazard_Level_Code,0) || chr(13) || chr(10)
+      || chr(13) || chr(10)
+      || '[ Number_Of_LS_Calls]: '
+      || ifnull(Number_Of_LS_Calls,0) || chr(13) || chr(10)
+      || chr(13) || chr(10)
+      ||'[ Referral Notes ]: '
+      ||ifnull(ss.referred_reason_notes,' ') ||chr(13) || chr(10)
+      || chr(13) || chr(10)
+      ||'[ Comments ]: '
+      ||ifnull(ef.operatorcomments,' ') ||chr(13) || chr(10)
+      || chr(13) || chr(10)
+      ||'[ Cause Code ]: '
+      ||ifnull(cd.causecode,' ') ||chr(13) || chr(10)
+      ||'[ Action Taken ]: '
+      ||ifnull(omsat.action_taken,' ') ||chr(13) || chr(10)
+) AS DETAILS,
+ 
+CASE
+    WHEN OPID2.OPERATOR_ID NOT LIKE '0%'
+    and OPID2.OPERATOR_ID NOT IN ('SUBSTATION', 'AMS', 'SCADA', 'SUBSTATIONC', 'ABB ENGINE')
+    THEN 'Controller Restored Event'
+    ELSE OPID2.OPERATOR_ID
+    END AS Restored_By,
+ 
+OPID2.OPERATOR_ID,
+ef.STARTDATETIME,
+ef.RESTOREDDATETIME,
+cd.CAUSECODE,
+omsat.ACTION_TAKEN,
+ef.SUBSTATIONNAME,
+ef.SERVICECENTER,
+ef.NUMCUSTDEENERGIZED,
+ef.DURATIONMIN,
+ef.DURATIONHM,
+ef.CMI,
+ef.BUILD_TYPE
+FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_EVENT_FACT` EF
+-------------------------------------------------------------------------------Cause Code Table Join
+    LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_CAUSE_DIM`  cd ON ef.causekey = cd.causekey
+-------------------------------------------------------------------------------OMS Action Taken Table Join
+    LEFT JOIN (
+         SELECT distinct
+            eventname,
+              string_agg(action_taken_name,' , ' ORDER BY eventname) AS action_taken
+         FROM
+            `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_ALL_ACTIONS_TAKEN`
+        Where
+        1=1
+ GROUP BY
+             eventname
+    ) omsat ON ef.eventname = omsat.eventname
+-------------------------------------------------------------------------------------Service suite table info
+    LEFT JOIN (
+        SELECT distinct
+            eventname,
+            outage_cause_desc,
+            referred_reason_notes,
+        FROM
+            `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_SERVICE_SUITE`
+        where
+        1=1
+    ) ss ON ef.eventname = ss.eventname
+--------------------------------------------------------------------------------------------------------------------------------------
+left join (
+SELECT distinct
+EVENTNAME,
+CAUSENAME,
+ACTION_TAKEN_NAME,
+FROM
+(
+  SELECT distinct *,
+  row_number() over (partition by EVENTNAME, METERNAME order by AMI_INSERT_TS desc) as AMI_INSERT_TS_Order
+  FROM
+  `smart-meter-production.RELIABILITY.T_FP_AMI_OUTAGES`
+  WHERE
+  ACTUALPERIODSTART BETWEEN DATETIME("2024-12-19") AND DATETIME_ADD("2024-12-31", INTERVAL 1 DAY)
+)
+WHERE
+1=1
+and AMI_INSERT_TS_Order = 1
+group by EVENTNAME, CAUSENAME, ACTION_TAKEN_NAME
+) AMI
+on EF.eventname = AMI.eventname
+-----------------------------------------------------------------------------------------------------------------
+Left join (
+SELECT distinct
+EVENTNAME,
+MATCH,
+LPE_MATCH,
+CAUSENAME,
+ACTION_TAKEN_NAME,
+Count(Partial_Match_PRN) AS Partial_Match_PRN_Count,
+FROM
+(
+  SELECT distinct*,
+  case  
+  when MATCH = "Partial_Match_Prns" then 1
+  else null
+  end as Partial_Match_PRN,
+  row_number() over (partition by EVENTNAME, METERNAME order by AMI_INSERT_TS desc) as AMI_INSERT_TS_Order
+  FROM
+  `smart-meter-production.RELIABILITY.T_FP_AMI_OUTAGES`
+  WHERE
+  ACTUALPERIODSTART BETWEEN DATETIME("2024-12-19") AND DATETIME_ADD("2024-12-31", INTERVAL 1 DAY)
+)
+WHERE
+1=1
+and LPE_MATCH = "No_Match_LPE"
+and MATCH ='Partial_Match_Prns'
+and AMI_INSERT_TS_Order = 1
+group by EVENTNAME, MATCH, LPE_MATCH,CAUSENAME, ACTION_TAKEN_NAME
+) AMI2
+on EF.eventname = AMI2.eventname
+------------------------------------------------------------------------------------------------------------------------------
+Left join (
+SELECT distinct
+EVENTNAME,
+Count(Partial_Match_Pon) AS Partial_Match_PON_Count,
+FROM
+(
+  SELECT distinct *,
+  case  
+  when MATCH = "Partial_Match_Pons" then 1
+  else null
+  end as Partial_Match_PON,
+  row_number() over (partition by EVENTNAME, METERNAME order by AMI_INSERT_TS desc) as AMI_INSERT_TS_Order
+  FROM
+  `smart-meter-production.RELIABILITY.T_FP_AMI_OUTAGES`
+  WHERE
+  ACTUALPERIODSTART BETWEEN DATETIME("2024-12-19") AND DATETIME_ADD("2024-12-31", INTERVAL 1 DAY)
+)
+WHERE
+1=1
+and LPE_MATCH = "No_Match_LPE"
+and MATCH ='Partial_Match_Pons'
+and AMI_INSERT_TS_Order = 1
+group by EVENTNAME
+) AMI3
+on EF.eventname = AMI3.eventname
+------------------------------------------------------------------------------------------------------------------------------
+Left join (
+SELECT distinct
+EVENTNAME,
+Count(True_Match) AS True_Match_Count,
+FROM
+(
+  SELECT distinct*,
+  case  
+  when MATCH = "True_Match" then 1
+  else null
+  end as True_Match,
+  row_number() over (partition by EVENTNAME, METERNAME order by AMI_INSERT_TS desc) as AMI_INSERT_TS_Order
+  FROM
+  `smart-meter-production.RELIABILITY.T_FP_AMI_OUTAGES`
+  WHERE
+  ACTUALPERIODSTART BETWEEN DATETIME("2024-12-19") AND DATETIME_ADD("2024-12-31", INTERVAL 1 DAY)
+)
+WHERE
+1=1
+and LPE_MATCH = "No_Match_LPE"
+and MATCH ='True_Match'
+and AMI_INSERT_TS_Order = 1
+group by EVENTNAME
+) AMI4
+on EF.eventname = AMI4.eventname
+--------------------------------------------------------------------------------------------------------------------------------------------------------------
+left join (
+SELECT distinct eventkey,
+count(CALLCODE) as Number_OF_LS_Calls
+FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_CALL_FACT`
+where
+1=1
+and CALLCODE = 'LS-Lights Out'
+group by eventkey) CF
+ON EF.eventkey = CF.eventkey
+-----------------------------------------------------------------------------------------------------------------------------------
+left join ( SELECT distinct eventname, new_value, OPERATOR_ID
+FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_GAP_AUDIT_LOG`
+where 1=1
+and new_value LIKE '%OUTAGE_STATUS_CHANGE; Status:CREATED%') OPID
+ON EF.eventname = OPID.eventname
+-- -----------------------------------------------------------------------------------------------------------------------------------
+left join (SELECT distinct eventname, new_value, OPERATOR_ID
+FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_GAP_AUDIT_LOG`
+where 1=1
+and new_value LIKE '%OUTAGE_STATUS_CHANGE; Status:Restored%') OPID2
+ON EF.eventname = OPID2.eventname
+-------------------------------------------------------------------------------------Phase and Hazard Info
+    LEFT JOIN (
+        SELECT distinct
+            eventname,
+            phase,
+            HAZARD,
+            hazard_level_code,
+            PARTIAL_CIRCUIT,
+            CASE
+                WHEN phase = 'C'   THEN 'Single Phase'
+                WHEN phase = '  C' THEN 'Single Phase'
+                WHEN phase = 'B'   THEN 'Single Phase'
+                WHEN phase = ' B ' THEN 'Single Phase'
+                WHEN phase = 'A'   THEN 'Single Phase'
+                WHEN phase = 'A  ' THEN 'Single Phase'
+                WHEN phase IS NULL THEN NULL
+                ELSE 'Multi Phase'
+            END AS phase_count
+        FROM
+            `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_GAP_NEW_COLS`
+    ) gnc ON ef.eventname = gnc.eventname
+---------------------------------------------------------------------------------------------------------------------------------------------
+-- left join (SELECT distinct OutageID, OutageDetails.sectionNumber,Max(OutageDetails.ponCount) as Pon_Count FROM `cnp-datafoundation-prod.ADMS_OEP.T_OEP_MESSAGES`
+-- WHERE
+-- 1=1
+-- and createdDateTime BETWEEN DATETIME("2024-12-19") AND DATETIME_ADD("2024-12-26", INTERVAL 1 DAY)
+-- group by  OutageID, OutageDetails.sectionNumber) OEP
+-- ON ef.eventname = OEP.OutageID
+---------------------------------------------------------------------------------------------------------------------------------- New
+left join (
+select distinct
+OutageID,
+OutageDetails.ponCount
+FROM
+(SELECT *,
+  row_number() over (partition by OutageID order by OutageDetails.ponCount desc) as Pon_Count_Order
+  FROM `cnp-datafoundation-prod.ADMS_OEP.T_OEP_MESSAGES`
+  WHERE
+  1=1
+  and createdDateTime BETWEEN DATETIME("2024-12-19") AND DATETIME_ADD("2024-12-31", INTERVAL 1 DAY)
+)
+WHERE
+1=1
+and createdDateTime BETWEEN DATETIME("2024-12-19") AND DATETIME_ADD("2024-12-31", INTERVAL 1 DAY)
+and Pon_Count_Order = 1
+order by OutageDetails.ponCount desc) OEP
+ON ef.eventname = OEP.OutageID
+-----------------------------------------------------------------------------------------------------------------------------------
+ 
+     where
+     1=1
+     and ef.STARTDATETIME BETWEEN DATETIME("2024-12-19") AND DATETIME_ADD("2024-12-31", INTERVAL 1 DAY)
+     and ef.EXCLUDETROUBLEFLAG = 0
+     and ef.MOMENTARYOUTAGEFLAG = 0
+     and ef.CANCELLEDFLAG = 0
+     and ef.PLANNEDOTGFLAG = 0
+     and ef.NONOUTGCALLFLAG = 0
+     and ef.ORPHANOUTAGEFLAG = 0
+     and ef.SERVICECENTER not in ('BV', 'EV', 'FB', 'MV', 'RP')
+     and ef.FEEDERNAME not in ('-Missing Feeder-')
+      and ef.trouble_lvl in ('T', 'F', 'L')-- NOD
+      and OPID.OPERATOR_ID = 'ABB ENGINE'-- NOD
+      and Number_OF_LS_Calls >= 1-- NOD
+      and AMI2.MATCH ='Partial_Match_Prns'-- NOD
+      and AMI2.Partial_Match_PRN_Count is not null -- NOD
+      and ifnull(True_Match_Count,0) = 0-- NOD
+      and ifnull(Partial_Match_PON_Count,0) = 0-- NOD
+      and (OPID2.OPERATOR_ID LIKE '0%'-- NOD
+      or OPID2.OPERATOR_ID IN ('SUBSTATION', 'AMS', 'SCADA', 'SUBSTATIONC', 'ABB ENGINE'))-- NOD
+      and omsat.ACTION_TAKEN not like '%7%%%'-- NOD
+     order by ef.FEEDERNAME, ef.STARTDATETIME
