@@ -1,0 +1,38 @@
+SELECT ss.EVENTNAME,
+       ef.STARTDATETIME,
+       ef.RESTOREDDATETIME,
+       omsat.action_taken,
+       ef.SUBSTATIONNAME,
+       ef.SERVICECENTER,
+       ef.NUMCUSTDEENERGIZED,
+       ef.DURATIONMIN,
+       ef.DURATIONHM,
+       ef.BUILD_TYPE
+ FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_SERVICE_SUITE` ss
+ INNER JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_EVENT_FACT` ef ON ef.EVENTNAME = ss.EVENTNAME
+ LEFT JOIN (
+          SELECT distinct
+             eventname,
+               string_agg(action_taken_name,' , ' ORDER BY eventname) AS action_taken
+          FROM
+             `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_ALL_ACTIONS_TAKEN`
+         Where
+         1=1
+  GROUP BY
+              eventname
+     ) omsat ON ef.eventname = omsat.eventname
+ WHERE OUTAGE_DATE BETWEEN DATETIME("2024-01-01") AND DATETIME_ADD("2025-01-01", INTERVAL 1 DAY)
+ AND ef.EXCLUDETROUBLEFLAG = 0
+   AND ef.MOMENTARYOUTAGEFLAG = 0
+   AND ef.CANCELLEDFLAG = 0
+   AND ef.PLANNEDOTGFLAG = 0
+   AND ef.NONOUTGCALLFLAG = 0
+   AND ef.ORPHANOUTAGEFLAG = 0
+   AND ef.SERVICECENTER NOT IN ('BV', 'EV', 'FB', 'MV', 'RP','INDIANA')
+   AND omsat.action_taken = '246 - Bypass Installed'
+   AND ef.FEEDERNAME != '-Missing Feeder-'
+--   AND ef.FEEDERNAME = 'PE03'
+ GROUP BY ef.EVENTNAME, ss.EVENTNAME,ef.STARTDATETIME,ef.RESTOREDDATETIME,omsat.action_taken,ef.SUBSTATIONNAME,ef.SERVICECENTER,ef.NUMCUSTDEENERGIZED,ef.DURATIONMIN,ef.DURATIONHM,ef.BUILD_TYPE
+ ORDER BY ef.STARTDATETIME,ef.RESTOREDDATETIME
+
+
