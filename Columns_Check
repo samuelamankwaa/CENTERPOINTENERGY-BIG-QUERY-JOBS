@@ -1,0 +1,3 @@
+SELECT column_name
+FROM `cnp-datafoundation-prod.EAI_ELEC_OPS.INFORMATION_SCHEMA.COLUMNS`
+WHERE table_name = 'T_ELEC_ORDER_TASKS';
