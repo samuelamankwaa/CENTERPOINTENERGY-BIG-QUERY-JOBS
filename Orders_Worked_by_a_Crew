@@ -1,0 +1,14 @@
+SELECT DISTINCT
+A.OrderNumber,
+A.OrderData.WorkOrderRecord.HazardLevelCode,
+A.Tasks.WorkOrderTask.TaskTracking.EventByUserId AS DispatchedBy,
+A.Tasks.WorkOrderTask.TaskAssignment.UserId AS DispatchedTo,
+DATETIME(A.Tasks.WorkOrderTask.TaskTracking.DispatchedAt,"America/Chicago") AS DispatchedAt
+FROM `cnp-datafoundation-prod.EAI_ELEC_OPS.T_ELEC_ORDER_TASKS` A
+WHERE
+TIMESTAMP_TRUNC(A.OrderUpdateTS, DAY) BETWEEN TIMESTAMP("2025-04-04") AND TIMESTAMP("2025-04-06")
+AND
+DATETIME(A.Tasks.WorkOrderTask.TaskTracking.DispatchedAt,"America/Chicago") BETWEEN ("2025-04-04") AND ("2025-04-06")
+AND
+A.Tasks.WorkOrderTask.TaskAssignment.UserId = '00222365' 
+ORDER BY A.OrderNumber
