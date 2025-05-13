@@ -1,0 +1,43 @@
+SELECT 
+  A.OrderNumber,
+  A.Tasks.WorkOrderTask.Organization.BusinessUnit AS Business_Name,
+  A.Tasks.WorkOrderTask.Organization.DispatchArea AS Dispatch_Area_Name,
+  A.Tasks.WorkOrderTask.TaskData.OrderRecord.EsiId AS Esiid,
+  A.OrderDescription AS Ojc_Job_Description,
+  A.Tasks.WorkOrderTask.Location.Address.AddressLineCombine AS OorAddress_1,
+  A.Tasks.WorkOrderTask.TaskTracking.PagerParameters.PageOn.taskDispatched AS Oor_Auto_Dispatch,
+  A.Tasks.WorkOrderTask.Activities.Activity.ActivityTracking.ClosedAt AS Oor_Complete_By,
+  A.Tasks.WorkOrderTask.TaskData.OrderRecord.DueDate AS Oor_Order_Due_Date,
+  A.Tasks.WorkOrderTask.CustomerContact.ContactPhone AS Oor_Contact_Phone,
+  A.Tasks.WorkOrderTask.TaskNumber AS Oor_Order_Num,
+  A.Tasks.WorkOrderTask.eventType AS Oor_Event_Completion_Status,
+  A.Tasks.WorkOrderTask.TaskTracking.EventByUserId AS Created_By,
+  DATETIME(A.Tasks.WorkOrderTask.eventAt,"America/Chicago") AS Oos_Created_At,
+  DATETIME(A.Tasks.WorkOrderTask.TaskTracking.DispatchedAt, "America/Chicago") AS DispatchedAt,
+   A.Tasks.WorkOrderTask.TaskAssignment.UserId AS DispatchedTo,
+  A.Tasks.WorkOrderTask.TaskTracking.EstimatedData.enRouteAt AS Oos_Enroute_At,
+  A.OrderStatus AS Oos_Order_Completion_Status,
+  ss.CREW_COMPLETION_DATE AS Date_Completed,
+  ss.ROWDATECREATED AS Date_released_to_service_suite, 
+  A.Tasks.WorkOrderTask.TaskTracking.AccumulatedData.NumberOf.timesOnSite AS Oos_Number_Of_Times_On_Site,
+  A.Tasks.WorkOrderTask.TaskTracking.AccumulatedData.NumberOf.timesOnSite AS Oos_Number_Of_Visits, 
+  A.Tasks.WorkOrderTask.TaskTracking.EstimatedData.onSiteAt AS Oos_Onsite_At,
+  A.Tasks.WorkOrderTask.TaskTracking.PagerParameters.PageOn AS Oos_Status_Changed, 
+  A.Tasks.WorkOrderTask.TaskTracking.EstimatedData.travelDuration AS Oos_Time_Enroute,
+  A.Tasks.WorkOrderTask.TaskTracking.AccumulatedData.TotalTime.enRoute AS Oos_Total_Time_Enroute,
+  A.Tasks.WorkOrderTask.TaskTracking.AccumulatedData.TotalTime.onSite AS Oos_Total_Time_On_Site,
+FROM `cnp-datafoundation-prod.EAI_ELEC_OPS.T_ELEC_ORDER_TASKS` A
+LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_SERVICE_SUITE` ss 
+  ON ss.EVENTNAME = A.OrderNumber
+WHERE TIMESTAMP_TRUNC(A.OrderUpdateTS, DAY) >=  TIMESTAMP("2020-01-08")
+--  AND A.OrderStatus = 'Complete'
+  AND A.OrderNumber = 'S000117139671'
+ORDER BY 
+  Oos_Created_At ASC,
+  DispatchedAt ASC,
+  Oor_Order_Due_Date ASC,
+  A.OrderNumber ASC,
+  Oos_Onsite_At ASC,
+  Oor_Complete_By ASC,
+  Oos_Enroute_At ASC,
+  DispatchedAt ASC
