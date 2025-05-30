@@ -35,3 +35,51 @@ WHERE ef.STARTDATETIME BETWEEN "2024-05-16T10:00:00" AND "2024-05-17T23:59:59"
   AND ef.SERVICECENTER NOT IN ('BV', 'EV', 'FB', 'MV', 'RP','INDIANA')
 GROUP BY ef.EVENTNAME, ef.STARTDATETIME, ef.RESTOREDDATETIME, ef.TROUBLE_LVL, ef.SERVICECENTER,ef.DEVICENAME,ef.DURATIONHM,ef.CAUSEKEY  -- Group only by event fact columns
 ORDER BY ef.STARTDATETIME, ef.RESTOREDDATETIME
+
+SECOND OPTION 
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+WITH ranked_events AS (
+  SELECT
+    ef.EVENTNAME,
+    ef.STARTDATETIME,
+    ef.RESTOREDDATETIME,
+    ef.TROUBLE_LVL,
+    ef.SERVICECENTER,
+    ef.CAUSEKEY,
+    cf.CALLCODE,
+    cf.CALLDESC,
+    cf.NO_CALLS AS NUM_OF_CALLS,
+    ss.ACTION_TAKEN_1, 
+    ss.ACTION_TAKEN_2, 
+    ss.ACTION_TAKEN_3, 
+    ss.ACTION_TAKEN_4, 
+    ss.ACTION_TAKEN_5, 
+    ss.ACTION_TAKEN_6, 
+    ss.CREW_NOTES AS COMMENTS,     
+    ef.DEVICENAME,     
+    ef.DURATIONHM,
+    ROW_NUMBER() OVER (
+      PARTITION BY ef.EVENTNAME 
+      ORDER BY ss.ACTION_TAKEN_1 DESC, cf.NO_CALLS DESC
+    ) AS row_num
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_EVENT_FACT` ef
+  LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_SERVICE_SUITE` ss  
+    ON ef.EVENTNAME = ss.EVENTNAME
+  LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_CALL_FACT` cf 
+    ON cf.EVENTKEY = ef.EVENTKEY
+  WHERE ef.STARTDATETIME >= DATETIME("2024-05-16T10:00:00") 
+    AND ef.STARTDATETIME < DATETIME("2024-05-17T23:59:59")
+    AND ef.EXCLUDETROUBLEFLAG = 0
+    AND ef.MOMENTARYOUTAGEFLAG = 0
+    AND ef.CANCELLEDFLAG = 0
+  --  AND ef.TROUBLE_LVL IS NOT NULL
+    AND ef.PLANNEDOTGFLAG = 0
+    AND ef.NONOUTGCALLFLAG = 0
+    AND ef.ORPHANOUTAGEFLAG = 0
+    AND ef.SERVICECENTER NOT IN ('BV', 'EV', 'FB', 'MV', 'RP', 'INDIANA')
+)
+SELECT * EXCEPT(row_num)
+FROM ranked_events
+WHERE row_num = 1
+;
