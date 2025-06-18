@@ -1,6 +1,6 @@
 WITH MCA4 AS (
   SELECT EVENTNAME, 
-         STRING_AGG(REGEXP_EXTRACT(NEW_VALUE, r'Comments:Cause Created ([^;]+)'), ', ') AS CAUSE_CODES
+         STRING_AGG(DISTINCT REGEXP_EXTRACT(NEW_VALUE, r'Comments:Cause Created ([^;]+)'), ', ') AS CAUSE_CODES
   FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_GAP_AUDIT_LOG`
   WHERE FIELD_CHANGED = 'OUTAGE_CAUSE'
     AND NEW_VALUE LIKE '%Event_Type:OUTAGE_CAUSE; Status:CREATED;%'
@@ -96,6 +96,14 @@ ranked_events AS (
     cd.CAUSECODE AS CAUSECODE,
     cd.CAUSEDESC AS CAUSEDESC,
     MCA4.CAUSE_CODES AS All_CAUSE_CODES,
+    CASE 
+      WHEN MCA4.CAUSE_CODES IS NULL THEN 0
+      ELSE ARRAY_LENGTH(ARRAY(
+        SELECT TRIM(cause_code)
+        FROM UNNEST(SPLIT(MCA4.CAUSE_CODES, ',')) AS cause_code
+        WHERE TRIM(cause_code) != ''
+      ))
+    END AS Number_of_Cause_Codes,
     effsd.Max_Cust_Aff_Date AS MAX_CUST_AFF_DATE,
     effsd.action_taken AS ACTION_TAKEN,
     inc.incident_complete AS INCIDENT_COMPLETE,
@@ -116,7 +124,7 @@ ranked_events AS (
     ON ef.eventname = MCA4.EVENTNAME
   LEFT JOIN inc_cte inc
     ON ef.eventname = inc.eventname
-  WHERE ef.startdatetime >= DATETIME("2025-01-01T00:00:00")
+  WHERE ef.startdatetime >= DATETIME_SUB(CURRENT_DATETIME(), INTERVAL 30 DAY)
     AND ef.SERVICECENTER NOT IN ('BV', 'EV', 'FB', 'MV', 'RP')
     AND inc.incident_complete IS NULL
     AND effsd.trouble_lvl IS NOT NULL
@@ -124,6 +132,7 @@ ranked_events AS (
     AND ef.CANCELLEDFLAG = 0
   GROUP BY ef.EVENTNAME, effsd.trouble_lvl, ef.Startdatetime, cd.CAUSECODE, cd.CAUSEDESC, MCA4.CAUSE_CODES, effsd.Max_Cust_Aff_Date, 
            effsd.action_taken, inc.incident_complete, effsd.phase_count, ef.DURATIONHM, effsd.CMI, ef.OPERATORCOMMENTS
+  ORDER BY  ef.startdatetime
 )
 SELECT * EXCEPT(row_num)
 FROM ranked_events
