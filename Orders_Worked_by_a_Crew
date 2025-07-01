@@ -14,3 +14,48 @@ A.OrderNumber IS NOT NULL
 AND 
 A.Tasks.WorkOrderTask.TaskAssignment.UserId = '00225' 
 ORDER BY  DispatchedAt 
+
+
+----------------------------------------------------------------------------------------------------------------------------------------------------
+----------------------------------------------------------------------------------------------------------------------------------------------------
+----------------------------------------------------------------------------------------------------------------------------------------------------
+
+SELECT DISTINCT
+A.OrderNumber,
+DATETIME(A.Tasks.WorkOrderTask.TaskTracking.DispatchedAt,"America/Chicago") AS DispatchedAt,
+A.Tasks.WorkOrderTask.TaskTracking.EstimatedData.enRouteAt AS Enroute_At,
+A.OrderType,
+A.Tasks.WorkOrderTask.Location.Address.AddressLineCombine AS Location,
+A.OrderStatus,
+A.Tasks.WorkOrderTask.TaskTracking.EventByUserId AS DispatchedBy,
+ef.OPERATORCOMMENTS as Dispatcher_Comments,
+A.Tasks.WorkOrderTask.TaskAssignment.UserId AS CrewID,
+SS.CREW_NAME AS CREW_NAME,
+SS.CREW_NOTES AS Crew_Remarks
+FROM `cnp-datafoundation-prod.EAI_ELEC_OPS.T_ELEC_ORDER_TASKS` A
+LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_EVENT_FACT` ef 
+  ON ef.EVENTNAME = A.OrderNumber
+LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_SERVICE_SUITE` SS 
+ ON SS.EVENTNAME = ef.EVENTNAME
+LEFT JOIN  `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_CALL_FACT` cf 
+  ON cf.EVENTKEY = ef.EVENTKEY
+WHERE
+TIMESTAMP_TRUNC(A.OrderUpdateTS, DAY) BETWEEN TIMESTAMP("2022-04-04") AND TIMESTAMP("2025-07-02")
+AND
+DATETIME(A.Tasks.WorkOrderTask.TaskTracking.DispatchedAt,"America/Chicago") BETWEEN ("2022-04-04") AND ("2025-07-02")
+--AND
+--A.OrderNumber IS NOT NULL
+--AND 
+--A.OrderNumber = '5600216'
+AND 
+A.OrderNumber IN ('5600216', '10816176')
+--AND 
+--cf.CALLNUM ='10816176'
+--A.Tasks.WorkOrderTask.TaskAssignment.UserId = '00225' 
+GROUP BY A.OrderNumber, A.Tasks.WorkOrderTask.TaskTracking.DispatchedAt, A.Tasks.WorkOrderTask.TaskTracking.EstimatedData.enRouteAt,A.OrderType, A.Tasks.WorkOrderTask.Location.Address.AddressLineCombine, A.Tasks.WorkOrderTask.TaskTracking.EventByUserId, A.Tasks.WorkOrderTask.TaskAssignment.UserId, A.OrderStatus, SS.CREW_NOTES,
+SS.CREW_NAME,ef.OPERATORCOMMENTS
+ORDER BY A.OrderNumber, DispatchedAt
+
+
+--SELECT * FROM  `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_EVENT_FACT` LIMIT 300
+--SELECT * FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_SERVICE_SUITE` LIMIT 300
