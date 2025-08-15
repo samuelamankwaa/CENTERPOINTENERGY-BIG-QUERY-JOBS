@@ -1,0 +1,62 @@
+SELECT DISTINCT
+       ss.EVENTNAME,
+       ef.FEEDERNAME,
+       ef.STARTDATETIME,
+       ef.RESTOREDDATETIME,
+       ef.TROUBLE_LVL,
+       cf.CALLCODE AS HAZARD_CALLCODE,
+       cf.CALLDESC AS HAZARD_CALLDESC,
+       cf.NO_CALLS AS NUM_OF_CALLS,
+       omsat.action_taken AS ACTION_TAKEN,      
+       ef.SERVICECENTER,
+       ef.DEVICENAME,     
+       ef.DURATIONHM
+ FROM  `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_EVENT_FACT` ef
+ INNER JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_SERVICE_SUITE` ss ON ef.EVENTNAME = ss.EVENTNAME
+ INNER JOIN  `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_CALL_FACT` cf ON cf.EVENTKEY = ef.EVENTKEY
+ LEFT JOIN (
+          SELECT distinct
+             eventname,
+               string_agg(action_taken_name,' , ' ORDER BY eventname) AS action_taken
+          FROM
+             `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_ALL_ACTIONS_TAKEN`
+         Where
+         1=1
+  GROUP BY
+              eventname
+     ) omsat ON ef.eventname = omsat.eventname
+  WHERE ef.STARTDATETIME >= DATETIME("2023-01-01T00:00:00") 
+   AND ef.STARTDATETIME < DATETIME("2025-08-15T23:59:59")
+   AND ef.STARTDATETIME NOT BETWEEN "2024-07-07T00:00:00" 
+   AND "2024-07-10T23:59:59"
+   AND ef.STARTDATETIME NOT BETWEEN "2024-05-16T10:00:00" 
+   AND "2024-05-17T23:59:59"
+   AND ef.EXCLUDETROUBLEFLAG = 0
+   AND ef.MOMENTARYOUTAGEFLAG = 0
+   AND ef.CANCELLEDFLAG = 0
+   AND ef.PLANNEDOTGFLAG = 0
+   AND ef.NONOUTGCALLFLAG = 0
+   AND ef.ORPHANOUTAGEFLAG = 0
+   AND ef.SERVICECENTER NOT IN ('BV', 'EV', 'FB', 'MV', 'RP','INDIANA')
+--   AND ef.TROUBLE_LVL = 'F'
+--   AND cf.CALLCODE != 'TC-Traffic Control'
+--   AND cf.CALLCODE != 'LS-Lights Out'
+--   AND cf.CALLCODE != 'DL-Dim Lights'
+--   AND cf.CALLCODE != 'CV-Check Voltage'  
+--   AND cf.CALLCODE != 'OK'
+--   AND cf.CALLCODE != 'CS-Customer'
+--   AND cf.CALLCODE != 'PS-Partial Service'
+--   AND ef.FEEDERNAME != '-Missing Feeder-'
+   AND (cf.CALLDESC LIKE '%WB%' OR cf.CALLDESC LIKE '%MB%' OR cf.CALLDESC LIKE '%PB%' OR cf.CALLDESC LIKE '%PD%' OR cf. 
+   CALLDESC LIKE '%TB%' OR cf.CALLDESC LIKE '%TR%' OR cf.CALLDESC LIKE '%TC%' OR cf.CALLDESC LIKE '%Traffic Control%' OR cf. 
+   CALLDESC LIKE '%WD%' OR cf.CALLDESC LIKE '%Wire Down%' OR cf.CALLDESC LIKE'%FR%' OR cf.CALLDESC LIKE '%Fire%')
+--   AND cf.CALLDESC IN ('WB','MB','PB','PD','TB','TR','TC','Traffic Control','WD','Wire Down','FR','Fire')
+
+ GROUP BY ef.EVENTNAME, ss.EVENTNAME,ef.STARTDATETIME,ef.RESTOREDDATETIME,omsat.action_taken,ef.SUBSTATIONNAME,ef.DURATIONHM, ef.SERVICECENTER,ef.FEEDERNAME,ef.TROUBLE_LVL, ef.DEVICENAME,cf.NO_CALLS, cf.CALLCODE,cf.CALLDESC
+ ORDER BY ef.STARTDATETIME, ef.RESTOREDDATETIME, cf.CALLDESC
+
+
+--SELECT * FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_SERVICE_SUITE` LIMIT 100
+
+--SELECT * FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_EVENT_FACT` LIMIT 10
+--SELECT DISTINCT CALLCODE FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_CALL_FACT` 
