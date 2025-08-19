@@ -44,3 +44,51 @@ SELECT * EXCEPT(row_num)
 FROM ranked_events
 WHERE row_num = 1
 ORDER BY STARTDATETIME;
+
+==============================================================================================================================================================================================================
+
+WITH ranked_events AS (
+  SELECT
+    ef.EVENTNAME,
+    cl.CUSTSUPPLYLINKID AS ESIID,
+    ef.STARTDATETIME,
+    ef.RESTOREDDATETIME,
+    cf.CALLERTYPE,
+    ef.TROUBLE_LVL,
+    ef.SERVICECENTER,
+    cf.CALLCODE,
+    cf.CALLDESC,
+    cf.NO_CALLS,
+    ss.ACTION_TAKEN_1, 
+    ss.ACTION_TAKEN_2, 
+    ss.ACTION_TAKEN_3, 
+    ss.ACTION_TAKEN_4, 
+    ss.ACTION_TAKEN_5, 
+    ss.ACTION_TAKEN_6, 
+    ss.CREW_NOTES AS COMMENTS,     
+    ef.DEVICENAME,     
+    ef.DURATIONHM,
+    ROW_NUMBER() OVER (
+      PARTITION BY ef.EVENTNAME 
+      ORDER BY ss.ACTION_TAKEN_1 DESC, cf.NO_CALLS DESC
+    ) AS row_num
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_EVENT_FACT` ef
+  LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_SERVICE_SUITE` ss ON ef.EVENTNAME = ss.EVENTNAME
+  LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_CALL_FACT` cf ON cf.EVENTKEY = ef.EVENTKEY
+  LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_CUSTAFFECTED_INT` ct ON ct.GROUPEVENTKEY = ef.GROUPEVENTKEY 
+  LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_CUSTSUPPLYLINK_FACT` cl ON cl.CUSTKEY = ct.CUSTKEY 
+  WHERE ef.STARTDATETIME >= DATETIME_SUB(CURRENT_DATETIME(), INTERVAL 7 DAY)
+    AND ef.STARTDATETIME < CURRENT_DATETIME()
+    AND ef.EXCLUDETROUBLEFLAG = 0
+    AND ef.MOMENTARYOUTAGEFLAG = 0
+    AND ef.CANCELLEDFLAG = 0
+    AND ef.PLANNEDOTGFLAG = 0
+    AND ef.NONOUTGCALLFLAG = 0
+    AND cf.CALLERTYPE = 'PAS'
+    AND ef.ORPHANOUTAGEFLAG = 0
+    AND ef.SERVICECENTER NOT IN ('BV', 'EV', 'FB', 'MV', 'RP', 'INDIANA')
+)
+SELECT * EXCEPT(row_num)
+FROM ranked_events
+WHERE row_num = 1
+ORDER BY STARTDATETIME;
