@@ -1,0 +1,144 @@
+WITH MCA4 AS (
+  SELECT EVENTNAME, 
+         STRING_AGG(DISTINCT REGEXP_EXTRACT(NEW_VALUE, r'Comments:Cause Created ([^;]+)'), ', ') AS CAUSE_CODES
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_GAP_AUDIT_LOG`
+  WHERE FIELD_CHANGED = 'OUTAGE_CAUSE'
+    AND NEW_VALUE LIKE '%Event_Type:OUTAGE_CAUSE; Status:CREATED;%'
+  GROUP BY EVENTNAME
+),
+effsd_cte AS (
+  SELECT DISTINCT 
+    effsd.eventname,
+    effsd.trouble_lvl,
+    Cra1.First_Arrival,
+    MCAA.OUTAGE_DATE AS Max_Cust_Aff_Date,
+    qaat1.action_taken,
+    create_aud.operator_id,
+    cocr.CALLERTYPE,
+    qaef1.phase_count,
+    effsd.CMI,
+    CASE
+      WHEN effsd.trouble_lvl IN ('F') 
+           AND Cra1.First_Arrival > MCAA.OUTAGE_DATE
+      THEN 'Fuse_SD'
+      ELSE NULL
+    END AS Fuse_SD
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_EVENT_FACT` effsd
+  LEFT JOIN (
+    SELECT DISTINCT eventname, OUTAGE_DATE
+    FROM (
+      SELECT eventname, OUTAGE_DATE, CUST_AFF,
+             DENSE_RANK() OVER (PARTITION BY eventname ORDER BY CUST_AFF DESC) AS CUST_AFF_Order
+      FROM (
+        SELECT eventname, OUTAGE_DATE,
+               SAFE_CAST(SUBSTR(new_value, INSTR(new_value,'Affected')+9, 15) AS INT64) AS CUST_AFF
+        FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_GAP_AUDIT_LOG`
+        WHERE new_value LIKE '%Customers_Affected%'
+      )
+    )
+    WHERE CUST_AFF_Order = 1
+  ) MCAA ON effsd.eventname = MCAA.eventname
+  LEFT JOIN (
+    SELECT EVENTNAME, OUTAGE_DATE AS First_Arrival
+    FROM (
+      SELECT EVENTNAME, OUTAGE_DATE, 
+             DENSE_RANK() OVER (PARTITION BY EVENTNAME ORDER BY MESSAGE_ID) AS Arrival_Order
+      FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_GAP_AUDIT_LOG`
+      WHERE NEW_VALUE LIKE '%ARRIVED%'
+    )
+    WHERE Arrival_Order = 1
+  ) Cra1 ON effsd.eventname = Cra1.eventname
+  LEFT JOIN (
+    SELECT eventname,
+           CASE
+             WHEN phase IN ('A', 'B', 'C', '  C', ' B ', 'A  ') THEN 'Single Phase'
+             WHEN phase IS NULL THEN NULL
+             ELSE 'Multi Phase'
+           END AS phase_count
+    FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_GAP_NEW_COLS`
+  ) qaef1 ON effsd.eventname = qaef1.eventname
+  LEFT JOIN (
+    SELECT eventname,
+           STRING_AGG(action_taken_name, ' , ' ORDER BY action_taken_name) AS action_taken
+    FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_ALL_ACTIONS_TAKEN`
+    GROUP BY eventname
+  ) qaat1 ON qaef1.eventname = qaat1.eventname
+  LEFT JOIN (
+    SELECT DISTINCT eventkey, CALLERTYPE
+    FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_CALL_FACT`
+    --WHERE CALLERTYPE = 'CREW'
+    GROUP BY eventkey, CALLERTYPE
+  ) cocr ON effsd.eventkey = cocr.eventkey
+  LEFT JOIN (
+    SELECT DISTINCT eventname, operator_id
+    FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_GAP_AUDIT_LOG`
+    WHERE new_value LIKE '%OUTAGE_STATUS_CHANGE; Status:CREATED%'
+    GROUP BY eventname, operator_id
+  ) create_aud ON effsd.eventname = create_aud.eventname
+),
+inc_cte AS (
+  SELECT eventname,
+         CASE WHEN SUM(added_inc_com) - SUM(deleted_inc_com) >= 1 THEN '*Incident Completed*' ELSE NULL END AS incident_complete
+  FROM (
+    SELECT eventname,
+           CASE WHEN new_value LIKE '%Incident completed%%' THEN 1 ELSE 0 END AS added_inc_com,
+           CASE WHEN new_value LIKE '%Incident Uncompleted%' THEN 1 ELSE 0 END AS deleted_inc_com
+    FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_GAP_AUDIT_LOG`
+    WHERE new_value LIKE '%Incident completed%%' OR new_value LIKE '%Incident Uncompleted%'
+  )
+  GROUP BY eventname
+),
+ranked_events AS (
+  SELECT DISTINCT 
+    ef.EVENTNAME,
+    effsd.trouble_lvl AS TROUBLE_LVL,
+    ef.Startdatetime AS STARTDATETIME,
+    ef.RESTOREDDATETIME AS RESTOREDDATETIME,
+    ef.MOMENTARYOUTAGEFLAG,
+--    ef.FEEDERNAME AS CIRCUIT_NAME,
+--    ef.CIRCUITKEY AS CIRCUITID,
+--    ef.DEVICENAME,
+    ef.SERVICECENTER,
+--    ef.EVENTLOCATION AS LOCATION,
+    cd.CAUSECODE AS CAUSECODE,
+    ef.NUMCUSTDEENERGIZED AS CUSTOMERS_AFFECTED,
+    effsd.action_taken AS ACTION_TAKEN,
+    ef.DURATIONHM AS DURATIONHM,
+--    ef.EVENTPRIORITYNUM as HAZARD_LEVEL,
+    ef.OPERATORCOMMENTS AS COMMENTS,
+    ROW_NUMBER() OVER (
+      PARTITION BY ef.EVENTNAME 
+      ORDER BY effsd.action_taken DESC, ef.Startdatetime DESC
+    ) AS row_num
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_EVENT_FACT` ef
+  LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_CAUSE_DIM` cd 
+    ON ef.causekey = cd.causekey
+  LEFT JOIN effsd_cte effsd
+    ON ef.eventname = effsd.eventname
+  LEFT JOIN MCA4
+    ON ef.eventname = MCA4.EVENTNAME
+  LEFT JOIN inc_cte inc
+    ON ef.eventname = inc.eventname
+  WHERE ef.RESTOREDDATETIME >= DATETIME('2025-01-01T00:00:00') 
+    AND ef.RESTOREDDATETIME < DATETIME('2025-12-31T23:59:59')
+    AND ef.SERVICECENTER NOT IN ('BV', 'EV', 'FB', 'MV', 'RP')
+--    AND effsd.trouble_lvl IS NOT NULL
+  --  AND ef.MOMENTARYOUTAGEFLAG = 0
+    AND ef.PLANNEDOTGFLAG = 0
+    AND ef.CANCELLEDFLAG = 0
+    AND cd.CAUSECODE = 'Z1 - Unknown'
+  --  AND ef.TROUBLE_LVL = 'F'
+  --  AND ef.DEVICENAME LIKE '%RECL%'
+  --  AND CALLERTYPE != 'CREW'
+  GROUP BY ef.EVENTNAME, effsd.trouble_lvl, ef.Startdatetime, cd.CAUSECODE, ef.EVENTLOCATION, ef.FEEDERNAME, ef.NUMCUSTDEENERGIZED,ef.EVENTLOCATION,ef.CIRCUITKEY, ef.MOMENTARYOUTAGEFLAG,
+           effsd.action_taken,ef.EVENTPRIORITYNUM, effsd.phase_count, ef.DURATIONHM, effsd.CMI, ef.OPERATORCOMMENTS, ef.RESTOREDDATETIME,  ef.SERVICECENTER,ef.DEVICENAME
+  ORDER BY  ef.startdatetime
+)
+SELECT * EXCEPT(row_num)
+FROM ranked_events
+WHERE row_num = 1;
+
+
+
+--SELECT *  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_EVENT_FACT`
+--SELECT DISTINCT CAUSEID, CAUSECODE FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_CAUSE_DIM` 
