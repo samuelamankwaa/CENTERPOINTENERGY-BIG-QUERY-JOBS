@@ -1,0 +1,57 @@
+SELECT DISTINCT
+  ef.EVENTNAME AS Outage,
+  ef.SERVICECENTER AS SvC_Cntr,
+  ef.STARTDATETIME AS Power_off_Date,
+  ef.MAXRESTOREDDATETIME AS Restoration_Date,
+  ef.EVENTLOCATION AS Event_Location,
+  ss.REFERRED,
+  ss.REFERRED_REASON,
+  ss.REFERRED_REASON_NOTES,
+  cd.CAUSECODE AS Cause_Code,
+  cd.CAUSEID,
+  cd.CAUSEDESC,
+  SS.OUTAGE_CAUSE_DESC AS Outage_Cause_Desc,
+  ARRAY_TO_STRING(ARRAY_AGG(action_taken) OVER (PARTITION BY ss.EVENTNAME), ' . ') AS Action_Taken,
+  A.Tasks.WorkOrderTask.TaskAssignment.UserId AS DispatchedTo,
+  SS.CREW_NAME AS Crew_Name,
+  CASE
+    WHEN STARTS_WITH(A.Tasks.WorkOrderTask.TaskAssignment.UserId, '009') THEN 'Y'
+    ELSE 'N'
+  END AS Contractor,
+  ef.OPERATORCOMMENTS AS Remarks_1,
+  SS.CREW_NOTES AS Remarks,
+FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_EVENT_FACT` ef 
+LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_SERVICE_SUITE` ss 
+  ON ss.EVENTNAME = ef.EVENTNAME
+LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_CAUSE_DIM` cd 
+  ON ef.causekey = cd.causekey
+CROSS JOIN UNNEST([
+  ss.ACTION_TAKEN_1, ss.ACTION_TAKEN_2, ss.ACTION_TAKEN_3, 
+  ss.ACTION_TAKEN_4, ss.ACTION_TAKEN_5, ss.ACTION_TAKEN_6
+]) AS action_taken
+LEFT JOIN `cnp-datafoundation-prod.EAI_ELEC_OPS.T_ELEC_ORDER_TASKS` A
+    ON ef.EVENTNAME = A.OrderNumber 
+    AND TIMESTAMP_TRUNC(A.OrderUpdateTS, DAY) BETWEEN TIMESTAMP("2025-01-01") AND TIMESTAMP("2025-09-18")
+WHERE 
+  ef.STARTDATETIME >= DATETIME('2025-01-01T00:00:00') 
+  AND ef.STARTDATETIME <= DATETIME('2025-09-18T23:59:59')
+  AND ef.MOMENTARYOUTAGEFLAG = 0 
+  AND ef.ORPHANOUTAGEFLAG = 0 
+  AND ef.CANCELLEDFLAG = 0 
+  AND ss.REFERRED = 'Y'
+  AND (
+    ss.REFERRED_REASON LIKE '%ATCCE%'
+    OR ss.REFERRED_REASON LIKE '%ATCCS%'
+    OR ss.REFERRED_REASON LIKE '%BCTC%'
+    OR (
+      ss.REFERRED_REASON LIKE '%Other%'
+      AND (ss.REFERRED_REASON_NOTES LIKE '%Tree%' OR ss.REFERRED_REASON_NOTES LIKE '%Vines%')
+    )
+    OR (
+      ss.REFERRED_REASON LIKE '%FMISC%'
+      AND (ss.REFERRED_REASON_NOTES LIKE '%Tree%' OR ss.REFERRED_REASON_NOTES LIKE '%Vines%')
+    )
+  )
+  AND cd.CAUSEID IN ('V1','V2', 'V3', 'V4', 'V5')   
+  AND ef.servicecenter NOT IN ('BV','EV','FB','MV','RP')
+ORDER BY ef.STARTDATETIME
