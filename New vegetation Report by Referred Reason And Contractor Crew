@@ -1,57 +1,76 @@
-SELECT DISTINCT
-  ef.EVENTNAME AS Outage,
-  ef.SERVICECENTER AS SvC_Cntr,
-  ef.STARTDATETIME AS Power_off_Date,
-  ef.MAXRESTOREDDATETIME AS Restoration_Date,
-  ef.EVENTLOCATION AS Event_Location,
-  ss.REFERRED,
-  ss.REFERRED_REASON,
-  ss.REFERRED_REASON_NOTES,
-  cd.CAUSECODE AS Cause_Code,
-  cd.CAUSEID,
-  cd.CAUSEDESC,
-  SS.OUTAGE_CAUSE_DESC AS Outage_Cause_Desc,
-  ARRAY_TO_STRING(ARRAY_AGG(action_taken) OVER (PARTITION BY ss.EVENTNAME), ' . ') AS Action_Taken,
-  A.Tasks.WorkOrderTask.TaskAssignment.UserId AS DispatchedTo,
-  SS.CREW_NAME AS Crew_Name,
-  CASE
-    WHEN STARTS_WITH(A.Tasks.WorkOrderTask.TaskAssignment.UserId, '009') THEN 'Y'
-    ELSE 'N'
-  END AS Contractor,
-  ef.OPERATORCOMMENTS AS Remarks_1,
-  SS.CREW_NOTES AS Remarks,
-FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_EVENT_FACT` ef 
-LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_SERVICE_SUITE` ss 
-  ON ss.EVENTNAME = ef.EVENTNAME
-LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_CAUSE_DIM` cd 
-  ON ef.causekey = cd.causekey
-CROSS JOIN UNNEST([
-  ss.ACTION_TAKEN_1, ss.ACTION_TAKEN_2, ss.ACTION_TAKEN_3, 
-  ss.ACTION_TAKEN_4, ss.ACTION_TAKEN_5, ss.ACTION_TAKEN_6
-]) AS action_taken
-LEFT JOIN `cnp-datafoundation-prod.EAI_ELEC_OPS.T_ELEC_ORDER_TASKS` A
-    ON ef.EVENTNAME = A.OrderNumber 
-    AND TIMESTAMP_TRUNC(A.OrderUpdateTS, DAY) BETWEEN TIMESTAMP("2025-01-01") AND TIMESTAMP("2025-09-18")
-WHERE 
-  ef.STARTDATETIME >= DATETIME('2025-01-01T00:00:00') 
-  AND ef.STARTDATETIME <= DATETIME('2025-09-18T23:59:59')
-  AND ef.MOMENTARYOUTAGEFLAG = 0 
-  AND ef.ORPHANOUTAGEFLAG = 0 
-  AND ef.CANCELLEDFLAG = 0 
-  AND ss.REFERRED = 'Y'
-  AND (
-    ss.REFERRED_REASON LIKE '%ATCCE%'
-    OR ss.REFERRED_REASON LIKE '%ATCCS%'
-    OR ss.REFERRED_REASON LIKE '%BCTC%'
-    OR (
-      ss.REFERRED_REASON LIKE '%Other%'
-      AND (ss.REFERRED_REASON_NOTES LIKE '%Tree%' OR ss.REFERRED_REASON_NOTES LIKE '%Vines%')
+WITH omsat AS (
+  SELECT DISTINCT
+    eventname,
+    STRING_AGG(DISTINCT action_taken_name, ' , ' ORDER BY action_taken_name) AS Action_Taken
+  FROM
+    `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_ALL_ACTIONS_TAKEN`
+  WHERE 1=1
+  GROUP BY eventname
+),
+deduped_events AS (
+  SELECT DISTINCT
+    ef.EVENTNAME AS Outage,
+    ef.SERVICECENTER AS SvC_Cntr,
+    ef.STARTDATETIME AS Power_off_Date,
+    ef.MAXRESTOREDDATETIME AS Restoration_Date,
+    ef.EVENTLOCATION AS Event_Location,
+    ss.REFERRED AS Referred,
+    ss.REFERRED_REASON AS Referred_Reason,
+    ss.REFERRED_REASON_NOTES AS Referred_Reason_Notes,
+    cd.CAUSECODE AS Cause_Code,
+    cd.CAUSEID AS Causeid,
+    cd.CAUSEDESC AS Causedesc,
+    ss.FOLLOW_UP_IND AS Follow_Up_Ind,
+    ss.FOLLOW_UP_ID AS Follow_Up_id,
+    ss.FOLLOW_UP_DESC AS Follow_Up_Desc,
+    A.Tasks.WorkOrderTask.TaskAssignment.UserId AS DispatchedTo,
+    SS.CREW_NAME AS Completed_by,
+     CASE
+      WHEN STARTS_WITH(A.Tasks.WorkOrderTask.TaskAssignment.UserId, '009') THEN 'Y'
+      ELSE 'N'
+    END AS Contractor,
+    ef.OPERATORCOMMENTS AS Remarks,
+    ROW_NUMBER() OVER (PARTITION BY ef.EVENTNAME ORDER BY ef.STARTDATETIME DESC) AS rn
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_EVENT_FACT` ef 
+  LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_SERVICE_SUITE` ss 
+    ON ss.EVENTNAME = ef.EVENTNAME
+  LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_CAUSE_DIM` cd 
+    ON ef.causekey = cd.causekey
+  LEFT JOIN `cnp-datafoundation-prod.EAI_ELEC_OPS.T_ELEC_ORDER_TASKS` A
+      ON ef.EVENTNAME = A.OrderNumber 
+      AND TIMESTAMP_TRUNC(A.OrderUpdateTS, DAY) BETWEEN TIMESTAMP("2025-01-01") AND TIMESTAMP("2025-09-18")
+  WHERE 
+    ef.STARTDATETIME >= DATETIME('2025-01-01T00:00:00') 
+    AND ef.STARTDATETIME <= DATETIME('2025-09-18T23:59:59')
+    AND ef.MOMENTARYOUTAGEFLAG = 0 
+    AND ef.ORPHANOUTAGEFLAG = 0 
+    AND ef.CANCELLEDFLAG = 0 
+--    AND ss.REFERRED = 'Y'
+    AND ss.FOLLOW_UP_IND = 'Y'
+    AND (
+      ss.REFERRED_REASON LIKE '%ATCCE%'
+      OR ss.REFERRED_REASON LIKE '%ATCCS%'
+      OR ss.REFERRED_REASON LIKE '%BCTC%'
+      OR (
+        ss.REFERRED_REASON LIKE '%Other%'
+        AND (ss.REFERRED_REASON_NOTES LIKE '%Tree%' OR ss.REFERRED_REASON_NOTES LIKE '%Vines%')
+      )
+      OR (
+        ss.REFERRED_REASON LIKE '%FMISC%'
+        AND (ss.REFERRED_REASON_NOTES LIKE '%Tree%' OR ss.REFERRED_REASON_NOTES LIKE '%Vines%')
+      )
     )
-    OR (
-      ss.REFERRED_REASON LIKE '%FMISC%'
-      AND (ss.REFERRED_REASON_NOTES LIKE '%Tree%' OR ss.REFERRED_REASON_NOTES LIKE '%Vines%')
-    )
-  )
-  AND cd.CAUSEID IN ('V1','V2', 'V3', 'V4', 'V5')   
-  AND ef.servicecenter NOT IN ('BV','EV','FB','MV','RP')
-ORDER BY ef.STARTDATETIME
+    AND cd.CAUSEID IN ('V1','V2', 'V3', 'V4', 'V5')   
+    AND ef.servicecenter NOT IN ('BV','EV','FB','MV','RP')
+)
+SELECT 
+  de.*,
+  omsat.Action_Taken
+FROM deduped_events de
+LEFT JOIN omsat ON de.Outage = omsat.eventname
+WHERE de.rn = 1
+ORDER BY de.Power_off_Date
+
+
+
+--select * from  `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_SERVICE_SUITE` limit 1000
