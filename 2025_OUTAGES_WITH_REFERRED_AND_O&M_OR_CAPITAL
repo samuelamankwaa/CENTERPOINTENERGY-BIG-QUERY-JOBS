@@ -23,7 +23,7 @@ WITH ranked_events AS (
       ORDER BY ef.COMPLETEDDATETIME DESC
     ) AS row_num
   FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_EVENT_FACT` ef
-  LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_SERVICE_SUITE` ss  
+  INNER JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_SERVICE_SUITE` ss  
     ON ef.EVENTNAME = ss.EVENTNAME
   LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_CAUSE_DIM` cd 
     ON ef.causekey = cd.causekey
@@ -39,7 +39,8 @@ WITH ranked_events AS (
               eventname
      ) omsat ON ef.eventname = omsat.eventname
   WHERE ef.STARTDATETIME BETWEEN "2025-01-01T00:00:00" AND "2025-12-31T23:59:59"
-    --AND ss.REQUIRES_WO = 'Y'
+--    AND (ss.REQUIRES_WO NOT IN ('Y') OR ss.REQUIRES_WO IS NULL)
+--    AND ss.REFERRED = 'Y'
 --    AND ef.EXCLUDETROUBLEFLAG = 0
     AND ef.MOMENTARYOUTAGEFLAG = 0
 --    AND ef.CANCELLEDFLAG = 0
