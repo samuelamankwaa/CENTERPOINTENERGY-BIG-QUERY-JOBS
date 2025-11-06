@@ -71,3 +71,101 @@ WHERE row_num = 1
  --  AND ef.PLANNEDOTGFLAG = 1
 --   AND ef.NONOUTGCALLFLAG = 0
  --  AND ef.ORPHANOUTAGEFLAG = 0
+================================================================================================================================================================================================
+================================================================================================================================================================================================
+
+WITH actions_oms AS (
+  SELECT
+    eventname,
+    STRING_AGG(action_taken_name, ' , ' ORDER BY action_taken_name) AS oms_action_taken
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_ALL_ACTIONS_TAKEN`
+  GROUP BY eventname
+),
+ss_rollup AS (
+  SELECT
+    EVENTNAME,
+    OUTAGE_CAUSE_CODE,
+    OUTAGE_CAUSE_DESC,
+    REFERRED,
+    REFERRED_DATE,
+    REFERRED_REASON,
+    REFERRED_REASON_NOTES,
+    FOLLOW_UP_ID,
+    FOLLOW_UP_DESC,
+    REQUIRES_WO,         -- "Work Order Required" / capital work indicator
+    WORK_TAG,            -- additional work/capital context
+    -- Collapse ACTION_TAKEN_1..6 into a single string (skip null/blank)
+    (
+      SELECT STRING_AGG(x, ' , ')
+      FROM UNNEST([
+        ACTION_TAKEN_1, ACTION_TAKEN_2, ACTION_TAKEN_3,
+        ACTION_TAKEN_4, ACTION_TAKEN_5, ACTION_TAKEN_6
+      ]) AS x
+      WHERE x IS NOT NULL AND x != ''
+    ) AS ss_action_taken
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_SERVICE_SUITE`
+)
+ 
+SELECT
+  -- Keys
+  ef.EVENTNAME                                    AS event_id,
+  ef.EVENTKEY                                     AS event_key,
+ 
+  -- Core times
+  ef.STARTDATETIME                                AS start_datetime,
+  ef.RESTOREDDATETIME                             AS restored_datetime,
+  ef.COMPLETEDDATETIME                            AS completed_datetime,
+  ef.DURATIONHM                                   AS duration_hm,
+ 
+  -- Geography & asset
+  ef.SERVICECENTER                                AS service_center,
+  ef.SUBSTATIONNAME                               AS substation_name,
+  ef.FEEDERNAME                                   AS circuit_name,
+  ef.DEVICENAME                                   AS device_name,
+ 
+  -- Impact & flags
+  ef.NUMCUSTDEENERGIZED                           AS customers_deenergized,
+  ef.NUMCALLS                                     AS num_calls,
+  ef.TROUBLE_LVL                                  AS trouble_level,
+  ef.MOMENTARYOUTAGEFLAG                          AS momentary_flag,
+  ef.CANCELLEDFLAG                                AS canceled_flag,
+ 
+  -- Cause (OMS dim) + comments
+  cd.CAUSECODE                                    AS oms_cause_code,
+  cd.CAUSEDESC                                    AS oms_cause_desc,
+  ef.OPERATORCOMMENTS                             AS operator_comments,
+ 
+  -- Action taken (OMS view)
+  ao.oms_action_taken                             AS oms_action_taken,
+ 
+  -- Service Suite enrichment (referrals, follow-ups, WO/capital, SS actions)
+  ss.OUTAGE_CAUSE_CODE                            AS ss_cause_code,
+  ss.OUTAGE_CAUSE_DESC                            AS ss_cause_desc,
+  ss.REFERRED                                     AS ss_referred_ind,
+  ss.REFERRED_DATE                                AS ss_referred_date,
+  ss.REFERRED_REASON                              AS ss_referred_reason,
+  ss.REFERRED_REASON_NOTES                        AS ss_referred_reason_notes,
+  ss.FOLLOW_UP_ID                                 AS ss_follow_up_id,
+  ss.FOLLOW_UP_DESC                               AS ss_follow_up_desc,
+  ss.REQUIRES_WO                                  AS ss_requires_wo,      -- capital/work order flag
+  ss.WORK_TAG                                     AS ss_work_tag,
+  ss.ss_action_taken                              AS ss_action_taken
+ 
+FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_EVENT_FACT` AS ef
+LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_CAUSE_DIM` AS cd
+  ON ef.CAUSEKEY = cd.CAUSEKEY
+LEFT JOIN actions_oms AS ao
+  ON ef.EVENTNAME = ao.EVENTNAME
+LEFT JOIN ss_rollup AS ss
+  ON ef.EVENTNAME = ss.EVENTNAME
+ 
+WHERE
+  -- 365-day lookback (use DATETIME to match ef.STARTDATETIME type)
+  ef.STARTDATETIME BETWEEN "2025-01-01T00:00:00" AND "2025-12-31T23:59:59"
+  -- Exclusions you requested
+  AND ef.CANCELLEDFLAG = 0
+  AND ef.MOMENTARYOUTAGEFLAG = 0
+  AND UPPER(ef.SERVICECENTER) NOT IN ('BV','EV','FB','MV','RP','EVANSVILLE','INDIANA')
+ 
+ORDER BY ef.STARTDATETIME ASC;
+ 
