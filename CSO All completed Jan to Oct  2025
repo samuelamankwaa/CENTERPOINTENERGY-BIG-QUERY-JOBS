@@ -1,0 +1,44 @@
+SELECT 
+  A.OrderNumber,
+  A.Tasks.WorkOrderTask.Organization.BusinessUnit AS Business_Name,
+  A.Tasks.WorkOrderTask.Organization.DispatchArea AS Dispatch_Area_Name,
+  A.OrderDescription AS Ojc_Job_Description,
+  A.OrderType AS HostJob_Name,
+  A.Tasks.WorkOrderTask.eventAt AS Oos_Created,
+  DATETIME(A.Tasks.WorkOrderTask.TaskTracking.DispatchedAt,"America/Chicago") AS DispatchedAt,
+  A.Tasks.WorkOrderTask.Location.Address.AddressLineCombine AS OorArea_Desc,
+  A.Tasks.WorkOrderTask.TaskTracking.PagerParameters.PageOn.taskDispatched AS Oor_Auto_Dispatch,
+  A.Tasks.WorkOrderTask.Activities.Activity.ActivityTracking.ClosedAt AS Oor_Complete_By,
+  A.Tasks.WorkOrderTask.CustomerContact.ContactPhone AS Oor_Contact_Phone,
+  A.Tasks.WorkOrderTask.TaskNumber AS Oor_Order_Num,
+  A.Tasks.WorkOrderTask.eventType AS Oor_Event_Completion_Status,
+  A.Tasks.WorkOrderTask.TaskNumber AS Oor_Work_Order,
+  A.Tasks.WorkOrderTask.TaskTracking.AcknowledgedAt AS Oos_Acknowledged_At,
+  A.Tasks.WorkOrderTask.TaskTracking.PagerParameters.PageOn.taskCanceled AS Oos_Cancelled,
+  A.Tasks.WorkOrderTask.TaskTracking.EstimatedData.enRouteAt AS Oos_Enroute_At,
+  A.OrderStatus AS Oos_Order_Completion_Status, 
+  A.Tasks.WorkOrderTask.TaskData.OrderRecord.EsiId AS Esiid,
+  A.Tasks.WorkOrderTask.TaskAssignment.UserId AS DispatchedTo,
+  ss.TRUCK_NUMBER
+  -- Flag to prioritize records updated in the past 24 hours
+--   CASE 
+--     WHEN A.Tasks.WorkOrderTask.Activities.Activity.ActivityTracking.ClosedAt >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN 1
+--     ELSE 0
+--   END AS Past_24_hours
+FROM `cnp-datafoundation-prod.EAI_ELEC_OPS.T_ELEC_ORDER_TASKS` A
+LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_SERVICE_SUITE` ss 
+  ON ss.EVENTNAME = A.OrderNumber
+WHERE
+  TIMESTAMP_TRUNC(A.OrderUpdateTS, DAY) BETWEEN TIMESTAMP("2025-01-01") AND TIMESTAMP("2025-10-31")
+ -- AND A.Tasks.WorkOrderTask.Activities.Activity.ActivityTracking.ClosedAt >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY )
+ -- AND A.OrderStatus = 'Complete'
+  AND A.Tasks.WorkOrderTask.Activities.Activity.ActivityTracking.ClosedAt 
+      BETWEEN TIMESTAMP("2025-01-01") AND TIMESTAMP("2025-10-31")
+  AND A.OrderType  NOT IN ('NON-CUST')
+  AND A.Tasks.WorkOrderTask.Organization.BusinessUnit IN ('0003', '4003','5003')
+ -- AND A.ORDERTYPE in ('INVOWM','M/MMTR','INVTEK','EST2TK','EST3TK','M/MTEK','EST2MT','EST3MT') 
+ORDER BY 
+  A.Tasks.WorkOrderTask.eventAt,
+--   Past_24_hours DESC,  -- rows from last 24h first
+  A.OrderNumber,
+  Oor_Complete_By
