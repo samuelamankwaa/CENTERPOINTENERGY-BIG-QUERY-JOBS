@@ -1,0 +1,43 @@
+---An example would look like a Temp Disconnect being completed Monday with an exclusionary HCO, but the MDM reporting meter readings the next day. 
+---Another example would look like an MVO or DNP being done with an exclusionary HCO Monday, but the MDM reporting readings the next day. 
+
+
+SELECT 
+  A.OrderNumber,
+  A.Tasks.WorkOrderTask.Organization.BusinessUnit AS Business_Name,
+  A.OrderType AS Ojc_Job_Name,
+  ss.SERVICE_CENTER_NAME AS Service_Center,
+  A.Tasks.WorkOrderTask.Activities.Activity.ActivityTracking.ClosedAt AS Order_Completion_Date,
+  A.Tasks.WorkOrderTask.TaskData.OrderRecord.EsiId AS Esiid,
+  A.Tasks.WorkOrderTask.TaskAssignment.UserId AS Completed_By,
+  A.Tasks.WorkOrderTask.CustomerContact.ContactPhone AS Oor_Contact_Phone,
+FROM `cnp-datafoundation-prod.EAI_ELEC_OPS.T_ELEC_ORDER_TASKS` A
+LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_SERVICE_SUITE` ss 
+  ON ss.EVENTNAME = A.OrderNumber
+WHERE TIMESTAMP_TRUNC(A.OrderUpdateTS, DAY) >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
+  AND A.OrderStatus = 'Complete'
+  AND A.Tasks.WorkOrderTask.eventAt >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
+  AND A.ORDERTYPE IN ('INVOWM','M/MMTR','INVTEK','EST2TK','EST3TK','M/MTEK','EST2MT','EST3MT')
+ORDER BY 
+  DATETIME(A.Tasks.WorkOrderTask.eventAt,"America/Chicago") DESC,
+  A.OrderNumber,
+  Order_Completion_Date;
+
+===========================================================================================================================
+===========================================================================================================================
+
+SELECT  
+Tasks.WorkOrderTask.ElecMtrUpd.LastKwh.HasChanged,
+Tasks.WorkOrderTask.ElecMtrUpd.Hco,
+Tasks.WorkOrderTask.ElecMtrUpd.BillClsChg,
+Tasks.WorkOrderTask.ElecMtrUpd.MtrNum.Value,
+Tasks.WorkOrderTask.ElecMtrUpd.LastDm.HasChanged,
+Tasks.WorkOrderTask.ElecMtrUpd. WrgServType,
+Tasks.WorkOrderTask.ElecMtrUpd.JobCdDesc.HasChanged,
+Tasks.WorkOrderTask.ElecMtrUpd.NMDev,
+FROM `cnp-datafoundation-prod.EAI_ELEC_OPS.T_ELEC_ORDER_TASKS` 
+WHERE TIMESTAMP_TRUNC(OrderUpdateTS, DAY) BETWEEN TIMESTAMP("2024-04-01") AND TIMESTAMP("2026-01-14")
+AND Tasks.WorkOrderTask.ElecMtrUpd.Hco IS NOT NULL
+
+
+
