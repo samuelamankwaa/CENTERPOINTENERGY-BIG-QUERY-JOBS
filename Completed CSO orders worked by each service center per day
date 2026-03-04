@@ -1,0 +1,78 @@
+SELECT 
+  A.OrderNumber,
+  A.OrderType AS Completed_CSOs,
+  A.Tasks.WorkOrderTask.Organization.DispatchArea AS Dispatch_Area_Name,
+  CASE
+    WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1001' THEN 'SYS - TBL Crew'
+    WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1004' THEN 'Meter Lab'
+    WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1005' THEN 'South Houston'
+    WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1006' THEN 'Spring Branch'
+    WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1007' THEN 'Sugar Land'
+    WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1008' THEN '3 PH Undergroun'
+    WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1012' THEN 'Baytown'
+    WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1013' THEN 'Bellaire'
+    WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1017' THEN 'Cypress'
+    WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1019' THEN 'Katy'
+    WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1020' THEN 'HO Clarke'
+    WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1021' THEN 'Greenspoint'
+    WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1022' THEN 'Galveston'
+    WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1023' THEN 'Fort Bend'
+    WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1024' THEN 'Humble'
+    WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1025' THEN 'Harrisburg'
+    WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1028' THEN 'CEHE-TRG-HOC'
+    WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1041' THEN 'Heavy Construction NW'
+    WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1042' THEN 'Heavy Construction SW'
+    WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1043' THEN 'Heavy Construction SE'
+  END AS Service_Ceneter_Name,
+  COUNT(*) OVER (
+    PARTITION BY
+      CASE
+        WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1001' THEN 'SYS - TBL Crew'
+        WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1004' THEN 'Meter Lab'
+        WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1005' THEN 'South Houston'
+        WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1006' THEN 'Spring Branch'
+        WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1007' THEN 'Sugar Land'
+        WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1008' THEN '3 PH Undergroun'
+        WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1012' THEN 'Baytown'
+        WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1013' THEN 'Bellaire'
+        WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1017' THEN 'Cypress'
+        WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1019' THEN 'Katy'
+        WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1020' THEN 'HO Clarke'
+        WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1021' THEN 'Greenspoint'
+        WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1022' THEN 'Galveston'
+        WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1023' THEN 'Fort Bend'
+        WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1024' THEN 'Humble'
+        WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1025' THEN 'Harrisburg'
+        WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1028' THEN 'CEHE-TRG-HOC'
+        WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1041' THEN 'Heavy Construction NW'
+        WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1042' THEN 'Heavy Construction SW'
+        WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1043' THEN 'Heavy Construction SE'
+      END,
+      DATE(A.Tasks.WorkOrderTask.Activities.Activity.ActivityTracking.ClosedAt)
+  ) AS Count_of_Daily_CSOs_per_Serv_Cent,
+  A.Tasks.WorkOrderTask.Activities.Activity.ActivityTracking.ClosedAt AS Date_Oor_Completed,
+  A.OrderDescription AS Ojc_Job_Description,
+  A.Tasks.WorkOrderTask.eventAt AS Oos_Created,
+  DATETIME(A.Tasks.WorkOrderTask.TaskTracking.DispatchedAt,"America/Chicago") AS DispatchedAt,
+  A.Tasks.WorkOrderTask.Location.Address.AddressLineCombine AS OorArea_Desc,
+  A.Tasks.WorkOrderTask.CustomerContact.ContactPhone AS Oor_Contact_Phone,
+  A.Tasks.WorkOrderTask.TaskNumber AS Oor_Order_Num,
+  A.Tasks.WorkOrderTask.eventType AS Oor_Event_Completion_Status,
+  A.Tasks.WorkOrderTask.TaskNumber AS Oor_Work_Order,
+  A.OrderStatus AS Oos_Order_Completion_Status, 
+  A.Tasks.WorkOrderTask.TaskData.OrderRecord.EsiId AS Esiid,
+  A.Tasks.WorkOrderTask.TaskAssignment.UserId AS Dispatched_To_Crew_ID
+FROM `cnp-datafoundation-prod.EAI_ELEC_OPS.T_ELEC_ORDER_TASKS` A
+LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_SERVICE_SUITE` ss 
+  ON ss.EVENTNAME = A.OrderNumber
+WHERE
+  TIMESTAMP_TRUNC(A.OrderUpdateTS, DAY) BETWEEN TIMESTAMP("2026-02-25") AND TIMESTAMP("2026-03-04")
+  AND A.Tasks.WorkOrderTask.eventType = 'Completed'
+  AND A.Tasks.WorkOrderTask.Activities.Activity.ActivityTracking.ClosedAt 
+      BETWEEN TIMESTAMP("2026-02-25") AND TIMESTAMP("2026-03-04")
+  AND A.ORDERTYPE IN ('RCTOPS','TMDOPS','LOFOPS') 
+ORDER BY 
+  A.Tasks.WorkOrderTask.Activities.Activity.ActivityTracking.ClosedAt,
+  A.Tasks.WorkOrderTask.eventAt,
+  A.OrderNumber,
+  Date_Oor_Completed;
