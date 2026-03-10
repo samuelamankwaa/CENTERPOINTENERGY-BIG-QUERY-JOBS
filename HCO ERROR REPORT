@@ -1,0 +1,39 @@
+---An example would look like a Temp Disconnect being completed Monday with an exclusionary HCO, but the MDM reporting meter readings the next day. 
+---Another example would look like an MVO or DNP being done with an exclusionary HCO Monday, but the MDM reporting readings the next day. 
+
+
+SELECT
+  A.Tasks.WorkOrderTask.ElecMtrUpd.MtrNum.Value AS Meter_ID,
+  A.Tasks.WorkOrderTask.TaskData.OrderRecord.EsiId AS ESIID,
+  A.OrderUpdateTS AS Completion_Date,
+  A.Tasks.WorkOrderTask.eventAt,
+  A.OrderType AS Job_Code,
+  A.Tasks.WorkOrderTask.ElecMtrUpd.Hco,
+  A.Tasks.WorkOrderTask.Location.Address.AddressLineCombine AS Address,
+  A.Tasks.WorkOrderTask.ElecMtrUpd.CompStatus,
+  CASE
+    WHEN A.Tasks.WorkOrderTask.ElecMtrUpd.Hco NOT IN ('MD','MR','WH','PD','TR','PL','NS') 
+      AND ss.CREW_COMPLETION_DATE >= sm.LOCAL_READ_TIME
+    THEN 'YES'
+    ELSE 'NO'
+  END AS SS_RECONNECTION_RECIEVED,
+  A.Tasks.WorkOrderTask.TaskAssignment.UserId AS Employee_ID
+FROM `cnp-datafoundation-prod.EAI_ELEC_OPS.T_ELEC_ORDER_TASKS` A 
+LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_SERVICE_SUITE` ss 
+  ON ss.EVENTNAME = A.OrderNumber
+LEFT JOIN `smart-meter-production.SMF.T_REGISTER_READ` sm
+  ON sm.METER_NO = A.Tasks.WorkOrderTask.ElecMtrUpd.MtrNum.Value 
+WHERE TIMESTAMP_TRUNC(A.OrderUpdateTS, DAY) BETWEEN TIMESTAMP("2026-02-25") AND TIMESTAMP("2026-02-26")
+  AND sm.LOCAL_READ_TIME BETWEEN DATETIME("2026-02-25") AND DATETIME_ADD(DATETIME("2026-02-26"), INTERVAL 1 DAY)
+--  AND A.OrderType IN ('TMDOPS','TMDMTR','RCTOPS','RCTMTR')
+--  AND A.OrderHostJob IN ('TMDOPS','TMDMTR','RCTOPS','RCTMTR')
+-- AND A.Tasks.WorkOrderTask.ElecMtrUpd.MtrNum.Value IS NOT NULL
+--  AND (
+--     CASE
+--       WHEN A.Tasks.WorkOrderTask.ElecMtrUpd.Hco NOT IN ('MD','MR','WH','PD','TR','PL','NS') 
+--         AND ss.CREW_COMPLETION_DATE >= sm.LOCAL_READ_TIME
+--       THEN 'YES'
+--       ELSE 'NO'
+--     END
+--   ) = 'NO'
+ORDER BY TIMESTAMP_TRUNC(A.OrderUpdateTS, DAY) ASC;
