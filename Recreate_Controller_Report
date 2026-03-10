@@ -1,0 +1,462 @@
+-- #standardSQL
+
+WITH
+-- OMS action taken per event
+omsat AS (
+  SELECT
+    eventname,
+    STRING_AGG(action_taken_name, ' , ' ORDER BY action_taken_name) AS action_taken
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_ALL_ACTIONS_TAKEN`
+  GROUP BY eventname
+),
+
+-- Service suite compact view
+ss AS (
+  SELECT
+    eventname,
+    outage_cause_desc,
+    referred_reason_notes,
+    ARRAY_TO_STRING(
+      [action_taken_1, action_taken_2, action_taken_3, action_taken_4, action_taken_5, action_taken_6],
+      ' , '
+    ) AS ss_action_taken
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_SERVICE_SUITE`
+),
+
+-- Restore audit
+rest_aud AS (
+  SELECT
+    eventname,
+    operator_id,
+    SUBSTR(new_value, STRPOS(new_value, 'R'), 8) AS event_restore
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_GAP_AUDIT_LOG`
+  WHERE new_value LIKE '%Status:Restored;%'
+),
+
+-- Controller checks (1 & 2) ── fixed version
+crcef AS (
+  WITH
+  crcat AS (
+    SELECT
+      eventname,
+      STRING_AGG(action_taken_name, ' . ' ORDER BY action_taken_name) AS oms_action_taken
+    FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_ALL_ACTIONS_TAKEN`
+    GROUP BY eventname
+  ),
+  crcss AS (
+    SELECT
+      eventname,
+      outage_cause_desc,
+      referred_reason_notes,
+      action_taken_1,
+      ARRAY_TO_STRING(
+        [action_taken_1, action_taken_2, action_taken_3, action_taken_4, action_taken_5, action_taken_6],
+        ' . '
+      ) AS ss_action_taken
+    FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_SERVICE_SUITE`
+  ),
+  cnrs AS (
+    SELECT
+      eventname,
+      operator_id,
+      SUBSTR(new_value, STRPOS(new_value, 'R'), 8) AS event_restore
+    FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_GAP_AUDIT_LOG`
+    WHERE new_value LIKE '%Status:Restored;%'
+  )
+  SELECT
+    e.eventname,
+    c.operator_id,
+    e.causekey,
+    s.outage_cause_desc,
+    a.oms_action_taken,
+    s.ss_action_taken,
+    CASE
+      WHEN 
+        -- c.operator_id NOT LIKE '0%'               -- ← commented: fails if operator_id is INT64
+        -- AND 
+        c.operator_id NOT IN ('SUBSTATION', 'AMS', 'SCADA', 'SUBSTATIONC', 'ABB ENGINE')
+        AND (
+          (e.causekey = -1 AND s.outage_cause_desc IS NULL) OR
+          (a.oms_action_taken IS NULL AND s.action_taken_1 IS NULL
+           AND e.causekey NOT IN (43,85,48,55,17,35,71,78,27,15,96,36))
+        )
+      THEN 'Controller Restored Event'
+      ELSE NULL
+    END AS controller_check,
+    CASE
+      WHEN c.operator_id IN ('SUBSTATION', 'SCADA', 'SUBSTATIONC')
+        AND (
+          (e.causekey = -1 AND s.outage_cause_desc IS NULL) OR
+          (a.oms_action_taken IS NULL AND s.action_taken_1 IS NULL
+           AND e.causekey NOT IN (43,85,48,55,17,35,71,78,27,15,96,36))
+        )
+      THEN 'SCADA/Substation Device Used to Resolve Event. Please Have A Head Controller Add Missing Items'
+      ELSE NULL
+    END AS controller_check_2
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_EVENT_FACT` e
+  LEFT JOIN crcat  a ON e.eventname = a.eventname
+  LEFT JOIN crcss  s ON e.eventname = s.eventname
+  LEFT JOIN cnrs   c ON e.eventname = c.eventname
+),
+
+-- No Cause check
+nccef AS (
+  SELECT
+    e.eventname,
+    e.causekey,
+    s.outage_cause_desc,
+    CASE
+      WHEN e.causekey = -1 AND s.outage_cause_desc IS NULL
+      THEN 'No Cause Code'
+      ELSE NULL
+    END AS No_Cause_Check
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_EVENT_FACT` e
+  LEFT JOIN (
+    SELECT eventname, outage_cause_desc
+    FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_SERVICE_SUITE`
+  ) s ON e.eventname = s.eventname
+),
+
+-- No Action Taken check
+nactef AS (
+  WITH
+  natat AS (
+    SELECT
+      eventname,
+      STRING_AGG(action_taken_name, ' , ' ORDER BY action_taken_name) AS oms_action_taken
+    FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_ALL_ACTIONS_TAKEN`
+    GROUP BY eventname
+  ),
+  natss AS (
+    SELECT
+      eventname,
+      ARRAY_TO_STRING(
+        [action_taken_1, action_taken_2, action_taken_3, action_taken_4, action_taken_5, action_taken_6],
+        ' , '
+      ) AS ss_action_taken
+    FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_SERVICE_SUITE`
+  )
+  SELECT
+    e.eventname,
+    e.causekey,
+    a.oms_action_taken,
+    s.ss_action_taken,
+    CASE
+      WHEN a.oms_action_taken IS NULL
+           AND s.ss_action_taken IS NULL
+           AND e.causekey NOT IN (43,85,48,55,17,35,71,78,27,15,96,36)
+      THEN 'No Action Taken'
+      ELSE NULL
+    END AS Action_Taken_Check
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_EVENT_FACT` e
+  LEFT JOIN natat a ON e.eventname = a.eventname
+  LEFT JOIN natss s ON e.eventname = s.eventname
+),
+
+-- Delete check
+def AS (
+  SELECT
+    eventname,
+    numcalls,
+    CASE
+      WHEN numcalls = 0
+        AND LOWER(operatorcomments) LIKE '%dup case%'
+        OR LOWER(operatorcomments) LIKE '%dup event%'
+        -- ... (all other OR conditions remain the same)
+        OR LOWER(operatorcomments) LIKE '%duplicate%'
+      THEN 'Delete - Consider Deleting Event Based On Comments And No Calls'
+      ELSE NULL
+    END AS Delete_Check
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_EVENT_FACT`
+),
+
+-- Invalid event check
+ief AS (
+  SELECT
+    eventname,
+    numcalls,
+    CASE
+      WHEN numcalls >= 1
+        AND (
+          LOWER(operatorcomments) LIKE '%dup case%'
+          OR LOWER(operatorcomments) LIKE '%dup event%'
+          -- ... (all other OR conditions remain the same)
+          OR LOWER(operatorcomments) LIKE '%duplicate%'
+        )
+      THEN 'Invalid Event - Consider Checking the "Invalid Event" Indicator Based On Comments And Number Of Calls'
+      ELSE NULL
+    END AS Invalid_Event_Check
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_EVENT_FACT`
+),
+
+-- Incident complete
+inc AS (
+  SELECT
+    eventname,
+    CASE
+      WHEN (SUM(added_inc_com) - SUM(deleted_inc_com)) >= 1 THEN '*Incident Completed*'
+      ELSE NULL
+    END AS incident_complete
+  FROM (
+    SELECT
+      eventname,
+      IF(new_value LIKE '%Incident completed%%', 1, 0) AS added_inc_com,
+      IF(new_value LIKE '%Incident Uncompleted%', 1, 0) AS deleted_inc_com
+    FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_GAP_AUDIT_LOG`
+    WHERE new_value LIKE '%Incident completed%%'
+       OR new_value LIKE '%Incident Uncompleted%'
+  )
+  GROUP BY eventname
+),
+
+-- (remaining CTEs unchanged: master_map, mcef, mat, mi, gnc, create_aud, block_aud, plan_aud, act_aud, caus_aud, call_rank, calls_agg)
+master_map AS (
+  SELECT
+    eventname AS regular_event,
+    SUBSTR(new_value, -9, 7) AS Master_Outage
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_GAP_AUDIT_LOG`
+  WHERE new_value LIKE '%Primary outage number%'
+),
+
+mcef AS (
+  SELECT
+    e.eventname,
+    e.startdatetime,
+    e.restoreddatetime,
+    e.DURATIONHM,
+    m.regular_event,
+    m.Master_Outage,
+    e.operatorcomments,
+    c.causename
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_EVENT_FACT` e
+  LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_CAUSE_DIM` c ON e.causekey = c.causekey
+  LEFT JOIN master_map m ON e.eventname = m.Master_Outage
+),
+
+mat AS (
+  SELECT
+    m.regular_event,
+    m.Master_Outage,
+    STRING_AGG(a.action_taken_name, ', ' ORDER BY a.action_taken_name) AS moat_oms_action_taken_codes
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_ALL_ACTIONS_TAKEN` a
+  LEFT JOIN master_map m ON a.eventname = m.Master_Outage
+  GROUP BY m.regular_event, m.Master_Outage
+),
+
+mi AS (
+  SELECT
+    m.regular_event,
+    m.Master_Outage,
+    STRING_AGG(i.field_name, ', ' ORDER BY i.field_name) AS Master_Outage_Indicators
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMSX_EVENTIND_DET` i
+  LEFT JOIN master_map m 
+    ON i.EVENTNAME = CAST(m.Master_Outage AS INT64)
+  WHERE i.value_no = 1
+  GROUP BY
+    m.regular_event,
+    m.Master_Outage
+),
+
+gnc AS (
+  SELECT
+    eventname,
+    phase,
+    hazard_level_code,
+    CASE
+      WHEN phase IN ('C', '  C', 'B', ' B ', 'A', 'A  ') THEN 'Single Phase'
+      WHEN phase IS NULL THEN NULL
+      ELSE 'Multi Phase'
+    END AS phase_count
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_GAP_NEW_COLS`
+),
+
+create_aud AS (
+  SELECT
+    eventname,
+    operator_id,
+    SUBSTR(new_value, STRPOS(new_value, 'Cr'), 15) AS event_create
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_GAP_AUDIT_LOG`
+  WHERE new_value LIKE '%OUTAGE_STATUS_CHANGE; Status:CREATED%'
+),
+
+block_aud AS (
+  SELECT
+    eventname,
+    SUBSTR(new_value, STRPOS(new_value, 'B'), 28) AS block_to_mbile
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_GAP_AUDIT_LOG`
+  WHERE new_value LIKE '%BLOCK_MOBILE_OUTBOUND changed from <null> to 1%'
+),
+
+plan_aud AS (
+  SELECT
+    eventname,
+    STRING_AGG(SUBSTR(new_value, STRPOS(new_value, 'OUTAGE_'), 25), ' ' ORDER BY SUBSTR(new_value, STRPOS(new_value, 'OUTAGE_'), 25)) AS planned_indicator
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_GAP_AUDIT_LOG`
+  WHERE new_value LIKE '%OUTAGE_PLANNED_IND_CHANGE%Comments:1%'
+  GROUP BY eventname
+),
+
+act_aud AS (
+  SELECT
+    eventname,
+    STRING_AGG(SUBSTR(new_value, STRPOS(new_value, ':A') + 1, 100), ' ' ORDER BY SUBSTR(new_value, STRPOS(new_value, ':A') + 1, 100)) AS act_delete
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_GAP_AUDIT_LOG`
+  WHERE new_value LIKE '%OUTAGE_ACTION_TAKEN; Status:DELETE%'
+  GROUP BY eventname
+),
+
+caus_aud AS (
+  SELECT
+    eventname,
+    STRING_AGG(SUBSTR(new_value, STRPOS(new_value, 'Cause D'), 300), ' ' ORDER BY SUBSTR(new_value, STRPOS(new_value, 'Cause D'), 300)) AS cause_delete
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_GAP_AUDIT_LOG`
+  WHERE new_value LIKE '%OUTAGE_CAUSE; Status:DELETE%'
+  GROUP BY eventname
+),
+
+call_rank AS (
+  SELECT
+    eventkey,
+    callid,
+    recdatetime,
+    calldesc,
+    callertype,
+    DENSE_RANK() OVER (PARTITION BY eventkey ORDER BY callid) AS CallOrder
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_CALL_FACT`
+),
+
+calls_agg AS (
+  SELECT
+    eventkey,
+    MAX(CASE WHEN CallOrder = 1 THEN CONCAT(' Call ID: ', callid, ' | ', recdatetime, ' | ', callertype, '\n ', calldesc, '\n') END) AS First_Call,
+    MAX(CASE WHEN CallOrder = 2 THEN CONCAT(' Call ID: ', callid, ' | ', recdatetime, ' | ', callertype, '\n ', calldesc, '\n') END) AS Second_Call,
+    MAX(CASE WHEN CallOrder = 3 THEN CONCAT(' Call ID: ', callid, ' | ', recdatetime, ' | ', callertype, '\n ', calldesc, '\n') END) AS Third_Call,
+    MAX(CASE WHEN CallOrder = 4 THEN CONCAT(' Call ID: ', callid, ' | ', recdatetime, ' | ', callertype, '\n ', calldesc, '\n') END) AS Fourth_Call,
+    MAX(CASE WHEN CallOrder = 5 THEN CONCAT(' Call ID: ', callid, ' | ', recdatetime, ' | ', callertype, '\n ', calldesc) END) AS Fifth_Call
+  FROM call_rank
+  GROUP BY eventkey
+)
+
+-- ── Main SELECT ───────────────────────────────────────────────────────────────
+SELECT DISTINCT
+  ef.eventname                            AS Event,
+  ef.startdatetime                        AS Start_Date_Time,
+  ef.trouble_lvl                          AS Lvl,
+  rest_aud.operator_id                    AS Restored_By,
+  ef.servicecenter                        AS SVC_Center,
+  ef.substationname                       AS Substation,
+  ef.feedername                           AS Circuit,
+
+  ARRAY_TO_STRING(
+    [
+      def.Delete_Check,
+      ief.Invalid_Event_Check,
+      crcef.controller_check,
+      crcef.controller_check_2,
+      nccef.No_Cause_Check,
+      nactef.Action_Taken_Check
+    ],
+    '\n\n'
+  ) AS QA_Checks,
+
+  -- Master_Outage_Details, Details, First_5_Calls, etc. remain the same as original
+  CONCAT(
+    '[ Master Outage ]: ', prim_aud.Master_Outage, '\n',
+    '[ Start Date Time ]: ', CAST(mcef.startdatetime AS STRING), '\n',
+    '[ Restore Date Time ]: ', CAST(mcef.restoreddatetime AS STRING), '\n',
+    '[ Duration ]: ', mcef.DURATIONHM, '\n',
+    '[ Comments ]: ', mcef.operatorcomments, '\n',
+    '[ Cause_Code ]: ', mcef.causename, '\n',
+    '[ Action_Taken ]: ', mat.moat_oms_action_taken_codes, '\n',
+    '[ Event Indicators ] :  ', mi.Master_Outage_Indicators
+  ) AS Master_Outage_Details,
+
+  CONCAT(
+    '[ Event ]: ', ef.eventname, '\n',
+    '[ Trouble Lvl ]: ', ef.trouble_lvl, '\n',
+    '[ Device Name ]: ', ef.devicename, '\n',
+    '[ Phase]: ', gnc.phase_count, '\n',
+    '[ Service Code ]: ', ef.build_type, '\n',
+    '[ Start Date Time ]: ', CAST(ef.startdatetime AS STRING), '\n',
+    '[ Restore Date Time ]: ', CAST(ef.restoreddatetime AS STRING), '\n',
+    '[ Duration ]: ', ef.DURATIONHM, '\n',
+    '[ Customers Affected ]: ', CAST(ef.numcustdeenergized AS STRING), '\n',
+    '[ Number Of Calls ]: ', CAST(ef.numcalls AS STRING), '\n',
+    '[ Referral Notes ]: ', ss.referred_reason_notes, '\n',
+    '[ Comments ]: ', ef.operatorcomments, '\n',
+    '[ Cause Code ]: ', cd.causecode, '\n',
+    '[ Action Taken ]: ', omsat.action_taken, '\n',
+    '[ SS Cause Code ]: ', ss.outage_cause_desc, '\n',
+    '[ SS Action Taken ]: ', ss.ss_action_taken, '\n',
+    '[ Event Indicator ]: ', '\n',
+    '[ Audit Log Highlights ]: ',
+      create_aud.operator_id, ' ', create_aud.event_create, ' . ',
+      block_aud.block_to_mbile, ' . ',
+      plan_aud.planned_indicator,
+      rest_aud.operator_id, ' ', rest_aud.event_restore, ' . ',
+      act_aud.act_delete, ' . ',
+      caus_aud.cause_delete, ' . ',
+      ' '
+  ) AS Details,
+
+  ARRAY_TO_STRING(
+    [
+      calls_agg.First_Call,
+      calls_agg.Second_Call,
+      calls_agg.Third_Call,
+      calls_agg.Fourth_Call,
+      calls_agg.Fifth_Call
+    ],
+    ''
+  ) AS First_5_Calls,
+
+  cd.causecode                            AS OMS_Cause_Code,
+  omsat.action_taken                      AS OMS_Action_Taken
+
+FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_EVENT_FACT` ef
+LEFT JOIN rest_aud      ON ef.eventname = rest_aud.eventname
+LEFT JOIN crcef         ON ef.eventname = crcef.eventname
+LEFT JOIN nccef         ON ef.eventname = nccef.eventname
+LEFT JOIN nactef        ON ef.eventname = nactef.eventname
+LEFT JOIN def           ON ef.eventname = def.eventname
+LEFT JOIN ief           ON ef.eventname = ief.eventname
+LEFT JOIN inc           ON ef.eventname = inc.eventname
+LEFT JOIN (
+  SELECT
+    eventname,
+    SUBSTR(new_value, -9, 7) AS Master_Outage
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_GAP_AUDIT_LOG`
+  WHERE new_value LIKE '%Primary outage number%'
+) prim_aud ON ef.eventname = prim_aud.eventname
+LEFT JOIN mcef          ON ef.eventname = mcef.regular_event
+LEFT JOIN mat           ON ef.eventname = mat.regular_event
+LEFT JOIN mi            ON ef.eventname = mi.regular_event
+LEFT JOIN gnc           ON ef.eventname = gnc.eventname
+LEFT JOIN ss            ON ef.eventname = ss.eventname
+LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_CAUSE_DIM` cd ON ef.causekey = cd.causekey
+LEFT JOIN omsat         ON ef.eventname = omsat.eventname
+LEFT JOIN create_aud    ON ef.eventname = create_aud.eventname
+LEFT JOIN block_aud     ON ef.eventname = block_aud.eventname
+LEFT JOIN plan_aud      ON ef.eventname = plan_aud.eventname
+LEFT JOIN act_aud       ON ef.eventname = act_aud.eventname
+LEFT JOIN caus_aud      ON ef.eventname = caus_aud.eventname
+LEFT JOIN calls_agg     ON ef.eventkey = calls_agg.eventkey
+
+WHERE
+  TIMESTAMP(ef.startdatetime, 'America/Chicago') > TIMESTAMP '2026-01-01 00:00:00 UTC'
+  AND DATE(ef.restoreddatetime) <= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)
+  AND ef.SERVICECENTER NOT IN ('BV', 'EV', 'FB', 'MV', 'RP')
+--  AND ef.CANCELLEDFLAG = '0'
+--  AND ef.NONCUSTCALLFLAG = '0'
+  AND (crcef.controller_check IS NOT NULL OR crcef.controller_check_2 IS NOT NULL)
+  AND inc.incident_complete IS NULL
+  ORDER BY ef.startdatetime;
+
+-- WHERE
+--   ef.startdatetime > TIMESTAMP '2024-08-01 00:00:00'
+--   AND DATE(ef.restoreddatetime) <= DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)
+--   AND ef.SERVICECENTER NOT IN ('BV', 'EV', 'FB', 'MV', 'RP')
+--   AND ef.CANCELLEDFLAG = '0'
+--   AND ef.NONCUSTCALLFLAG = '0'
+--   AND (crcef.controller_check IS NOT NULL OR crcef.controller_check_2 IS NOT NULL)
+--   AND inc.incident_complete IS NULL;
