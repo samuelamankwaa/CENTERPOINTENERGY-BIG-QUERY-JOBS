@@ -1,0 +1,67 @@
+-- StandardSQL in BigQuery
+
+WITH omsat AS (
+  SELECT
+    eventname,
+    STRING_AGG(action_taken_name, ' , ' ORDER BY eventname) AS action_taken
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_ALL_ACTIONS_TAKEN`
+  GROUP BY
+    eventname
+),
+
+ranked_events AS (
+  SELECT
+    ef.EVENTNAME,
+    -- If columns are DATETIME
+    FORMAT_DATETIME('%Y-%m-%d %H:%M:%S', ef.STARTDATETIME)      AS STARTDATETIME,
+    FORMAT_DATETIME('%Y-%m-%d %H:%M:%S', ef.RESTOREDDATETIME)   AS RESTOREDDATETIME,
+    FORMAT_DATETIME('%Y-%m-%d %H:%M:%S', ef.COMPLETEDDATETIME)  AS COMPLETION_DATE,
+    ef.EVENTLOCATION AS LOCATION,
+    ef.PLANNEDOTGFLAG,
+--    sn.SECTION_CODE,
+--    sn.PRIME_SECTION_CODE,
+    ef.SERVICECENTER,
+    ef.FEEDERNAME,
+    cd.CAUSECODE,
+    ef.NUMCUSTDEENERGIZED AS CUSTOMERS_AFFACTED,
+    ef.DEV_ID AS DEVICE_ID,
+    ss.CREW_NAME,
+    ss.CREW_ID,
+    omsat.action_taken AS ACTION_TAKEN,
+    ef.OPERATORCOMMENTS AS COMMENTS,
+    ROW_NUMBER() OVER (
+      PARTITION BY ef.EVENTNAME
+      ORDER BY ef.COMPLETEDDATETIME DESC
+    ) AS row_num
+  FROM  `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_EVENT_FACT` ef
+  LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_SERVICE_SUITE` ss
+    ON ef.EVENTNAME = ss.EVENTNAME
+  LEFT JOIN  `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_CAUSE_DIM` cd
+    ON ef.causekey = cd.causekey
+  LEFT JOIN omsat
+    ON ef.EVENTNAME = omsat.eventname
+ -- LEFT JOIN `obvwh.OMS_SECTION_SUMMARY_fprp` sn
+ --   ON ef.EVENTNAME = sn.EVENTNAME
+  WHERE
+    -- Make all three DATETIME
+    ef.STARTDATETIME BETWEEN
+      DATETIME '2025-01-01 00:00:00'
+      AND
+      DATETIME '2025-12-21 23:59:59'
+    AND (
+      cd.CAUSECODE LIKE '%EM%' OR cd.CAUSECODE LIKE '%IN%' OR cd.CAUSECODE LIKE '%CR%' OR
+      cd.CAUSECODE LIKE '%DC%' OR cd.CAUSECODE LIKE '%LA%' OR cd.CAUSECODE LIKE '%RS%' OR
+      cd.CAUSECODE LIKE '%TM%' OR cd.CAUSECODE LIKE '%UU%' OR cd.CAUSECODE LIKE '%VT%'
+    )
+    AND cd.CAUSECODE = 'IN - Inspection, Test, Repair or Change'
+    AND ef.SERVICECENTER NOT IN ('BV', 'EV', 'FB', 'MV', 'RP', 'INDIANA')
+)
+
+SELECT
+  *
+FROM ranked_events
+WHERE row_num = 1
+ORDER BY
+  COMPLETION_DATE,
+  RESTOREDDATETIME,
+  STARTDATETIME;
