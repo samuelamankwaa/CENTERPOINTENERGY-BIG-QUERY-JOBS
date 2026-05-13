@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Invoice - Sathya Technologies</title>
+    <style>
+        body { font-family: 'Segoe UI', Arial, sans-serif; margin: 40px; color: #333; line-height: 1.5; }
+        .invoice-container { max-width: 800px; margin: 0 auto; border: 1px solid #ddd; padding: 40px; box-shadow: 0 0 15px rgba(0,0,0,0.1); }
+        .header { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 3px solid #0d6efd; padding-bottom: 20px; margin-bottom: 30px; }
+        .company-info h1 { margin: 0; color: #0d6efd; font-size: 28px; }
+        .company-info p { margin: 5px 0; font-size: 14px; }
+        .invoice-meta { text-align: right; }
+        .invoice-meta h2 { margin: 0; color: #333; }
+        table { width: 100%; border-collapse: collapse; margin: 25px 0; }
+        th, td { padding: 12px 15px; text-align: left; border-bottom: 1px solid #eee; }
+        th { background-color: #f8f9fa; font-weight: 600; color: #444; }
+        .total-row { font-size: 18px; font-weight: bold; background-color: #f8f9fa; }
+        .footer { margin-top: 40px; font-size: 14px; color: #666; }
+        .amount { text-align: right; font-weight: 600; }
+    </style>
+</head>
+<body>
+
+<div class="invoice-container">
+    <!-- Header -->
+    <div class="header">
+        <div class="company-info">
+            <h1>Sathya Technologies</h1>
+            <p><strong>Google Cloud Certification Training Provider</strong></p>
+            <p>Rajaguru Chandrasekaran</p>
+            <p>Email: cvrajaguru@gmail.com</p>
+            <p>Phone: +1 (978) 827-2656</p>
+        </div>
+        <div class="invoice-meta">
+            <h2>INVOICE</h2>
+            <p><strong>Invoice No:</strong> INV-2026-047</p>
+            <p><strong>Date:</strong> February 20, 2026</p>
+            <p><strong>Due Date:</strong> March 18, 2026</p>
+        </div>
+    </div>
+
+    <!-- Bill To -->
+    <div style="margin-bottom: 30px;">
+        <strong>Bill To:</strong><br>
+        Samuel<br>
+        Houston, Texas, United States
+    </div>
+
+    <h3>Service Details</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>Description</th>
+                <th>Period</th>
+                <th class="amount">Amount (USD)</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>Google Cloud Certification Training Program</td>
+                <td>February 20, 2026 – March 18, 2026</td>
+                <td class="amount">$260.00</td>
+            </tr>
+        </tbody>
+        <tfoot>
+            <tr class="total-row">
+                <td colspan="2" style="text-align:right;"><strong>Total Amount</strong></td>
+                <td class="amount"><strong>$260.00</strong></td>
+            </tr>
+        </tfoot>
+    </table>
+
+    <p><strong>Payment Terms:</strong> Payment due within 14 days of invoice date. Please include Invoice No. INV-2026-047 in your payment reference.</p>
+
+    <div class="footer">
+        <p>Thank you for choosing Sathya Technologies for your Google Cloud Certification Training.</p>
+        <p>For any questions or clarifications, please contact Rajaguru Chandrasekaran.</p>
+        <p style="margin-top: 30px; text-align: center; color: #999;">
+            Sathya Technologies • Professional Training & Certification Services
+        </p>
+    </div>
+</div>
+
+</body>
+</html>
