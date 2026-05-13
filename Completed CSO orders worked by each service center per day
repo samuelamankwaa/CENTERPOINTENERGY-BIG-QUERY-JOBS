@@ -351,6 +351,70 @@ ORDER BY
   A.Tasks.WorkOrderTask.eventAt, 
   A.OrderUpdateTS,
   A.OrderNumber;
+==========================================================================================================================================
+==========================================================================================================================================
+THE BEST
+WITH base AS (
+  SELECT
+    A.OrderNumber,
+    CASE
+      WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1001' THEN 'SYS - TBL Crew'
+      WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1004' THEN 'Meter Lab'
+      WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1005' THEN 'South Houston'
+      WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1006' THEN 'Spring Branch'
+      WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1007' THEN 'Sugar Land'
+      WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1008' THEN '3 PH Undergroun'
+      WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1012' THEN 'Baytown'
+      WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1013' THEN 'Bellaire'
+      WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1017' THEN 'Cypress'
+      WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1019' THEN 'Katy'
+      WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1020' THEN 'HO Clarke'
+      WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1021' THEN 'Greenspoint'
+      WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1022' THEN 'Galveston'
+      WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1023' THEN 'Fort Bend'
+      WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1024' THEN 'Humble'
+      WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1025' THEN 'Harrisburg'
+      WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1028' THEN 'CEHE-TRG-HOC'
+      WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1041' THEN 'Heavy Construction NW'
+      WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1042' THEN 'Heavy Construction SW'
+      WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1043' THEN 'Heavy Construction SE'
+    END AS SvC_Cntr,
+    A.OrderType AS Completed_CSOs,
+    A.Tasks.WorkOrderTask.Location.Address.AddressLineCombine AS Address,
+    A.Tasks.WorkOrderTask.TaskData.OrderRecord.CompStatus AS CompStatus,
+    A.Tasks.WorkOrderTask.Activities.Activity.ActivityData.ElecOrder.TurnDwnCd1 AS TurnDwnCd1,
+    A.Tasks.WorkOrderTask.TaskData.OrderRecord.CsrRemarks AS CsrRemarks,
+    A.Tasks.WorkOrderTask.TaskTracking.CompletedAt.Value AS TaskCompletedAt,
+    A.Tasks.WorkOrderTask.Activities.Activity.ActivityTracking.CompletedByUserId AS CompletedByUserId,
+    ROW_NUMBER() OVER (
+      PARTITION BY A.OrderNumber
+      ORDER BY A.OrderUpdateTS DESC
+    ) AS rn 
+  FROM `cnp-datafoundation-prod.EAI_ELEC_OPS.T_ELEC_ORDER_TASKS` A
+  WHERE A.OrderUpdateTS >= TIMESTAMP_TRUNC(TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 DAY), DAY)
+   AND A.OrderUpdateTS < TIMESTAMP_TRUNC(CURRENT_TIMESTAMP(), DAY)
+    AND A.Tasks.WorkOrderTask.eventType = 'Completed'
+    AND A.Tasks.WorkOrderTask.TaskTracking.CompletedAt.Value IS NOT NULL
+    AND A.Tasks.WorkOrderTask.TaskData.OrderRecord.CompStatus IN ('CMPL', 'TRDN')
+    AND A.ORDERTYPE IN ('RCTOPS','TMDOPS','LOFOPS')
+)
+ 
+SELECT
+  OrderNumber,
+  SvC_Cntr,
+  Completed_CSOs,
+  COUNT(*) OVER (
+    PARTITION BY SvC_Cntr, DATE(TaskCompletedAt)
+  ) AS Count_of_Daily_CSOs_Per_Serv_Cent,
+  Address,
+  CompStatus,
+  TurnDwnCd1,
+  CsrRemarks,
+  TaskCompletedAt,
+  CompletedByUserId
+FROM base
+WHERE rn = 1
+ORDER BY TaskCompletedAt, OrderNumber;
 
 
   
