@@ -1,0 +1,69 @@
+WITH ranked_events AS (
+  SELECT
+    ef.EVENTNAME,
+    ss.ROWDATECREATED AS SS_ENTRY_TIME,
+    A.Tasks.WorkOrderTask.TaskTracking.EstimatedData.onSiteAt AS ONSITE_AT,
+     CASE 
+      WHEN ss.ROWDATECREATED IS NULL 
+        OR A.Tasks.WorkOrderTask.TaskTracking.EstimatedData.onSiteAt IS NULL 
+      THEN 'N/A'
+      ELSE 
+        FORMAT(
+          '%d hrs %d min',
+          TIMESTAMP_DIFF(
+            TIMESTAMP(A.Tasks.WorkOrderTask.TaskTracking.EstimatedData.onSiteAt),
+            TIMESTAMP(ss.ROWDATECREATED),
+            HOUR
+          ),
+          MOD(
+            TIMESTAMP_DIFF(
+              TIMESTAMP(A.Tasks.WorkOrderTask.TaskTracking.EstimatedData.onSiteAt),
+              TIMESTAMP(ss.ROWDATECREATED),
+              MINUTE
+            ), 
+            60
+          )
+        )
+    END AS RESPONSE_TIME,
+    ef.EVENTLOCATION AS LOCATION,
+    ef.PLANNEDOTGFLAG,
+    ef.MOMENTARYOUTAGEFLAG,
+    ef.SERVICECENTER,
+    ef.FEEDERNAME,
+    cd.CAUSECODE,
+    ef.NUMCUSTDEENERGIZED AS CUSTOMERS_AFFACTED,
+    ef.DEV_ID AS DEVICE_ID,
+    ss.CREW_NAME,
+    ss.CREW_ID,
+    omsat.action_taken AS ACTION_TAKEN,
+    ef.OPERATORCOMMENTS AS COMMENTS,
+    ROW_NUMBER() OVER (
+      PARTITION BY ef.EVENTNAME
+      ORDER BY ef.COMPLETEDDATETIME DESC
+    ) AS row_num
+
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_EVENT_FACT` ef
+  INNER JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_SERVICE_SUITE` ss  
+    ON ef.EVENTNAME = ss.EVENTNAME
+  LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_CAUSE_DIM` cd
+    ON ef.causekey = cd.causekey
+  LEFT JOIN `cnp-datafoundation-prod.EAI_ELEC_OPS.T_ELEC_ORDER_TASKS` A
+    ON ef.EVENTNAME = A.OrderNumber 
+   AND TIMESTAMP_TRUNC(A.OrderUpdateTS, DAY) BETWEEN TIMESTAMP("2026-05-17") AND TIMESTAMP("2026-05-31")
+  LEFT JOIN (
+    SELECT DISTINCT
+      eventname,
+      STRING_AGG(action_taken_name, ', ' ORDER BY eventname) AS action_taken
+    FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_ALL_ACTIONS_TAKEN`
+    GROUP BY eventname
+  ) omsat 
+    ON ef.eventname = omsat.eventname
+
+  WHERE  ss.ROWDATECREATED BETWEEN "2026-05-17T00:00:00" AND "2026-05-31T23:59:59"
+    AND ef.SERVICECENTER NOT IN ('BV', 'EV', 'FB', 'MV', 'RP', 'INDIANA')
+)
+
+SELECT * EXCEPT(row_num)
+FROM ranked_events
+WHERE row_num = 1
+ORDER BY SS_ENTRY_TIME, ONSITE_AT;
