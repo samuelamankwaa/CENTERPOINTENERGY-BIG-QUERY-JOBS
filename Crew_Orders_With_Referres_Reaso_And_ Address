@@ -1,0 +1,97 @@
+SELECT
+  t.OrderNumber,
+ 
+  -- Order-level status
+  t.action AS OrderAction,
+  t.OrderStatus,
+  t.OrderUpdateTS,
+  t.receiveTS,
+  t.SubmittedAt,
+  t.Tasks.WorkOrderTask.Location.Address.AddressLineCombine AS Location,
+ 
+  -- Order details
+  t.OrderClass,
+  t.OrderType,
+  t.OrderHostJob,
+  t.OrderDescription,
+ 
+  -- Task-level event
+  t.Tasks.WorkOrderTask.eventType AS TaskEventType,
+  t.Tasks.WorkOrderTask.eventAt AS TaskEventAt,
+  t.Tasks.WorkOrderTask.action AS TaskAction,
+  t.Tasks.WorkOrderTask.TaskNumber,
+  t.Tasks.WorkOrderTask.TaskType,
+ 
+  -- Crew assignment
+  t.Tasks.WorkOrderTask.TaskAssignment.UserId AS CrewUserId,
+  t.Tasks.WorkOrderTask.TaskTracking.History.PreviousAssignedUserId
+    AS PreviousCrewUserId,
+ 
+  -- Crew status
+  t.Tasks.WorkOrderTask.TaskData.OrderRecord.CrewActivityId,
+  t.Tasks.WorkOrderTask.TaskData.OrderRecord.CrewLeader,
+  t.Tasks.WorkOrderTask.TaskData.OrderRecord.CrewStatus,
+ 
+  -- Task status
+  t.Tasks.WorkOrderTask.TaskTracking.Status.Value AS TaskStatus,
+  t.Tasks.WorkOrderTask.TaskTracking.Status.code AS TaskStatusCode,
+  t.Tasks.WorkOrderTask.TaskTracking.Status.updatedAt
+    AS TaskStatusUpdatedAt,
+ 
+  -- User who performed the action
+  t.Tasks.WorkOrderTask.TaskTracking.EventByUserId,
+ 
+  -- Crew activity timestamps
+  t.Tasks.WorkOrderTask.TaskTracking.AllocatedAt,
+  t.Tasks.WorkOrderTask.TaskTracking.DispatchedAt,
+  t.Tasks.WorkOrderTask.TaskTracking.ReceivedOnMobileAt,
+  t.Tasks.WorkOrderTask.TaskTracking.AcknowledgedAt,
+  t.Tasks.WorkOrderTask.TaskTracking.EnRouteAt,
+  t.Tasks.WorkOrderTask.TaskTracking.OnSiteAt,
+  t.Tasks.WorkOrderTask.TaskTracking.SuspendedAt,
+  t.Tasks.WorkOrderTask.TaskTracking.ReferredAt,
+  t.Tasks.WorkOrderTask.TaskTracking.SetToPendingAt,
+  t.Tasks.WorkOrderTask.TaskTracking.CompletedAt.Value AS CompletedAt,
+  t.Tasks.WorkOrderTask.TaskTracking.ClosedAt,
+  t.Tasks.WorkOrderTask.TaskTracking.CanceledAt,
+ 
+  -- Referral information
+  t.Tasks.WorkOrderTask.TaskData.OrderRecord.SlaReferCd
+    AS OrderReferralCode,
+  t.Tasks.WorkOrderTask.TaskData.OrderRecord.SlaReferDT
+    AS OrderReferralDateTime,
+  t.Tasks.WorkOrderTask.TaskData.OrderRecord.SlaReferNotes
+    AS OrderReferralNotes,
+ 
+  t.Tasks.WorkOrderTask.EventData.ReferRecord.SlaReferCd
+    AS EventReferralCode,
+  t.Tasks.WorkOrderTask.EventData.ReferRecord.SlaReferDT
+    AS EventReferralDateTime,
+  t.Tasks.WorkOrderTask.EventData.ReferRecord.SlaReferNotes
+    AS EventReferralNotes,
+  t.Tasks.WorkOrderTask.EventData.ReferRecord.ReferRemarks
+    AS ReferralRemarks,
+ 
+  -- Notes
+  t.Tasks.WorkOrderTask.TaskNotes.Comment AS TaskComment,
+  t.Tasks.WorkOrderTask.TaskNotes.ReasonForActionCode,
+ 
+  -- Useful indicator
+  CASE
+    WHEN t.action LIKE '%REFER%'
+      OR t.OrderStatus LIKE '%REFER%'
+      OR t.Tasks.WorkOrderTask.eventType LIKE '%REFER%'
+      OR t.Tasks.WorkOrderTask.TaskTracking.ReferredAt IS NOT NULL
+    THEN 'Y'
+    ELSE 'N'
+  END AS WasReferred
+ 
+FROM `cnp-datafoundation-prod.EAI_ELEC_OPS.T_ELEC_ORDER_TASKS` t
+ 
+WHERE t.OrderUpdateTS BETWEEN TIMESTAMP("2026-07-26") AND TIMESTAMP("2026-07-28")
+--  AND t.OrderNumber = 'S000123839844'
+AND  t.Tasks.WorkOrderTask.Location.Address.AddressLineCombine  LIKE '%3127 S ROYCE CIR MANVEL%'
+ 
+ORDER BY
+  t.OrderUpdateTS,
+  TaskEventAt;
