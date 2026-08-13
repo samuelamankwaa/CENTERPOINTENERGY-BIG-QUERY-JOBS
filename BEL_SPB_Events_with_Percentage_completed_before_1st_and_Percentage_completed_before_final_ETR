@@ -328,3 +328,336 @@ ORDER BY
   ef.EVENTNAME;
 
 --  SELECT * FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_EVENT_FACT` LIMIT 3000
+========================================================================================================================================================
+========================================================================================================================================================
+
+WITH base_outages AS (
+  SELECT
+    ef.*
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_EVENT_FACT` ef
+  WHERE
+    ef.STARTDATETIME >= DATETIME('2026-08-10 00:00:00')
+    AND ef.STARTDATETIME < DATETIME('2026-08-10 23:59:59')
+    AND ef.CANCELLEDFLAG = 0
+    AND ef.MOMENTARYOUTAGEFLAG = 0
+    AND ef.SERVICECENTER IN ('BEL','SPB')
+    AND UPPER(ef.SERVICECENTER) NOT IN (
+      'BV',
+      'EV',
+      'FB',
+      'MV',
+      'RP',
+      'EVANSVILLE',
+      'INDIANA'
+    )
+),
+ 
+actions_oms AS (
+  SELECT
+    a.EVENTNAME,
+    STRING_AGG(
+      a.ACTION_TAKEN_NAME,
+      ' , '
+      ORDER BY a.ACTION_TAKEN_NAME
+    ) AS oms_action_taken
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_ALL_ACTIONS_TAKEN` a
+  INNER JOIN (
+    SELECT DISTINCT EVENTNAME
+    FROM base_outages
+  ) b
+    ON a.EVENTNAME = b.EVENTNAME
+  GROUP BY
+    a.EVENTNAME
+),
+ 
+ss_rollup AS (
+  SELECT
+    ss.EVENTNAME,
+    ss.OUTAGE_CAUSE_CODE,
+    ss.OUTAGE_CAUSE_DESC,
+    ss.REFERRED,
+    ss.REFERRED_DATE,
+    ss.REFERRED_REASON,
+    ss.REFERRED_REASON_NOTES,
+    ss.FOLLOW_UP_ID,
+    ss.FOLLOW_UP_DESC,
+    ss.REQUIRES_WO,
+    ss.WORK_TAG,
+ 
+    (
+      SELECT STRING_AGG(x, ' , ')
+      FROM UNNEST([
+        ss.ACTION_TAKEN_1,
+        ss.ACTION_TAKEN_2,
+        ss.ACTION_TAKEN_3,
+        ss.ACTION_TAKEN_4,
+        ss.ACTION_TAKEN_5,
+        ss.ACTION_TAKEN_6
+      ]) AS x
+      WHERE
+        x IS NOT NULL
+        AND TRIM(x) != ''
+    ) AS ss_action_taken
+ 
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_SERVICE_SUITE` ss
+  INNER JOIN (
+    SELECT DISTINCT EVENTNAME
+    FROM base_outages
+  ) b
+    ON ss.EVENTNAME = b.EVENTNAME
+),
+ 
+etr_audit_raw AS (
+  SELECT
+    ga.EVENTNAME,
+    ga.MESSAGE_ID,
+    ga.OPERATOR_ID,
+    ga.OUTAGE_DATE AS etr_change_datetime,
+    ga.NEW_VALUE,
+ 
+    SAFE.PARSE_DATETIME(
+      '%m/%d/%Y %I:%M %p',
+      TRIM(
+        REGEXP_EXTRACT(
+          ga.NEW_VALUE,
+          r'New_Date:([^;]+)'
+        )
+      )
+    ) AS etr_datetime_from_audit
+ 
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_GAP_AUDIT_LOG` ga
+ 
+  INNER JOIN (
+    SELECT DISTINCT EVENTNAME
+    FROM base_outages
+  ) b
+    ON ga.EVENTNAME = b.EVENTNAME
+ 
+  WHERE
+    ga.FIELD_CHANGED = 'ETOR_CHANGE'
+),
+ 
+etr_audit_counts AS (
+  SELECT
+    EVENTNAME,
+    COUNT(*) AS total_etor_audit_records,
+    COUNTIF(etr_datetime_from_audit IS NOT NULL) AS parsed_etor_audit_records
+  FROM etr_audit_raw
+  GROUP BY
+    EVENTNAME
+),
+ 
+etr_with_prior_max AS (
+  SELECT
+    EVENTNAME,
+    MESSAGE_ID,
+    OPERATOR_ID,
+    etr_change_datetime,
+    NEW_VALUE,
+    etr_datetime_from_audit,
+ 
+    MAX(etr_datetime_from_audit) OVER (
+      PARTITION BY EVENTNAME
+      ORDER BY
+        etr_change_datetime,
+        MESSAGE_ID
+      ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+    ) AS highest_prior_etr
+ 
+  FROM etr_audit_raw
+ 
+  WHERE
+    etr_datetime_from_audit IS NOT NULL
+),
+ 
+etr_filtered AS (
+  SELECT
+    EVENTNAME,
+    MESSAGE_ID,
+    OPERATOR_ID,
+    etr_change_datetime,
+    NEW_VALUE,
+    etr_datetime_from_audit
+ 
+  FROM etr_with_prior_max
+ 
+  WHERE
+    highest_prior_etr IS NULL
+    OR etr_datetime_from_audit >= highest_prior_etr
+),
+ 
+etr_rollup AS (
+  SELECT
+    EVENTNAME,
+ 
+    ARRAY_AGG(
+      STRUCT(
+        MESSAGE_ID,
+        OPERATOR_ID,
+        etr_change_datetime,
+        etr_datetime_from_audit,
+        NEW_VALUE
+      )
+      ORDER BY
+        etr_change_datetime ASC,
+        MESSAGE_ID ASC
+      LIMIT 1
+    )[OFFSET(0)] AS first_etr,
+ 
+    ARRAY_AGG(
+      STRUCT(
+        MESSAGE_ID,
+        OPERATOR_ID,
+        etr_change_datetime,
+        etr_datetime_from_audit,
+        NEW_VALUE
+      )
+      ORDER BY
+        etr_change_datetime DESC,
+        MESSAGE_ID DESC
+      LIMIT 1
+    )[OFFSET(0)] AS final_accepted_etr,
+ 
+    COUNT(*) AS accepted_etr_count
+ 
+  FROM etr_filtered
+ 
+  GROUP BY
+    EVENTNAME
+)
+ 
+SELECT
+  ef.EVENTNAME AS event_name,
+  ef.EVENTKEY AS event_key,
+ 
+  ef.STARTDATETIME AS start_datetime,
+  ef.RESTOREDDATETIME AS restored_datetime,
+  ef.COMPLETEDDATETIME AS completed_datetime,
+ 
+  CASE
+    WHEN ac.EVENTNAME IS NULL THEN 'No ETOR_CHANGE Found'
+    WHEN ac.parsed_etor_audit_records = 0 THEN 'ETOR_CHANGE Found - Date Not Parsed'
+    ELSE 'ETOR_CHANGE Found'
+  END AS etr_audit_status,
+ 
+  COALESCE(ac.total_etor_audit_records, 0) AS total_etor_audit_records,
+  COALESCE(ac.parsed_etor_audit_records, 0) AS parsed_etor_audit_records,
+  COALESCE(er.accepted_etr_count, 0) AS accepted_etr_count,
+ 
+  er.first_etr.etr_change_datetime AS first_etr_entered_datetime,
+  er.first_etr.etr_datetime_from_audit AS first_etr_datetime,
+  er.first_etr.OPERATOR_ID AS first_etr_operator_id,
+ 
+  er.final_accepted_etr.etr_change_datetime AS final_etr_entered_datetime,
+  er.final_accepted_etr.etr_datetime_from_audit AS final_etr_datetime,
+  er.final_accepted_etr.OPERATOR_ID AS final_etr_operator_id,
+ 
+  ef.ERTDATETIME AS current_oms_etr_datetime,
+ 
+  CASE
+    WHEN ac.EVENTNAME IS NULL
+      THEN 'No ETOR_CHANGE Found'
+ 
+    WHEN er.first_etr.etr_datetime_from_audit IS NULL
+      THEN 'First ETR Could Not Be Parsed'
+ 
+    WHEN ef.RESTOREDDATETIME IS NULL
+      THEN 'Not Restored'
+ 
+    WHEN ef.RESTOREDDATETIME >
+         er.first_etr.etr_datetime_from_audit
+      THEN 'Missed First ETR'
+ 
+    ELSE 'Met First ETR'
+  END AS first_etr_status,
+ 
+  CASE
+    WHEN er.first_etr.etr_datetime_from_audit IS NOT NULL
+      AND ef.RESTOREDDATETIME IS NOT NULL
+    THEN DATETIME_DIFF(
+      ef.RESTOREDDATETIME,
+      er.first_etr.etr_datetime_from_audit,
+      MINUTE
+    )
+  END AS first_etr_variance_minutes,
+ 
+  CASE
+    WHEN ac.EVENTNAME IS NULL
+      THEN 'No ETOR_CHANGE Found'
+ 
+    WHEN er.final_accepted_etr.etr_datetime_from_audit IS NULL
+      THEN 'Final ETR Could Not Be Parsed'
+ 
+    WHEN ef.RESTOREDDATETIME IS NULL
+      THEN 'Not Restored'
+ 
+    WHEN ef.RESTOREDDATETIME >
+         er.final_accepted_etr.etr_datetime_from_audit
+      THEN 'Missed Final ETR'
+ 
+    ELSE 'Met Final ETR'
+  END AS final_etr_status,
+ 
+  CASE
+    WHEN er.final_accepted_etr.etr_datetime_from_audit IS NOT NULL
+      AND ef.RESTOREDDATETIME IS NOT NULL
+    THEN DATETIME_DIFF(
+      ef.RESTOREDDATETIME,
+      er.final_accepted_etr.etr_datetime_from_audit,
+      MINUTE
+    )
+  END AS final_etr_variance_minutes,
+ 
+  ef.DURATIONHM AS duration_hm,
+ 
+  ef.SERVICECENTER AS service_center,
+  ef.SUBSTATIONNAME AS substation_name,
+  ef.FEEDERNAME AS circuit_name,
+  ef.DEVICENAME AS device_name,
+ 
+  ef.NUMCUSTDEENERGIZED AS customers_deenergized,
+  ef.NUMCALLS AS num_calls,
+  ef.TROUBLE_LVL AS trouble_level,
+  ef.MOMENTARYOUTAGEFLAG AS momentary_flag,
+  ef.CANCELLEDFLAG AS canceled_flag,
+ 
+  cd.CAUSECODE AS oms_cause_code,
+  cd.CAUSEDESC AS oms_cause_desc,
+  ef.OPERATORCOMMENTS AS operator_comments,
+ 
+  ao.oms_action_taken,
+ 
+  ss.OUTAGE_CAUSE_CODE AS ss_cause_code,
+  ss.OUTAGE_CAUSE_DESC AS ss_cause_desc,
+  ss.REFERRED AS ss_referred_ind,
+  ss.REFERRED_DATE AS ss_referred_date,
+  ss.REFERRED_REASON AS ss_referred_reason,
+  ss.REFERRED_REASON_NOTES AS ss_referred_reason_notes,
+  ss.FOLLOW_UP_ID AS ss_follow_up_id,
+  ss.FOLLOW_UP_DESC AS ss_follow_up_desc,
+  ss.REQUIRES_WO AS ss_requires_wo,
+  ss.WORK_TAG AS ss_work_tag,
+  ss.ss_action_taken
+ 
+FROM base_outages ef
+ 
+LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_CAUSE_DIM` cd
+  ON ef.CAUSEKEY = cd.CAUSEKEY
+ 
+LEFT JOIN actions_oms ao
+  ON ef.EVENTNAME = ao.EVENTNAME
+ 
+LEFT JOIN ss_rollup ss
+  ON ef.EVENTNAME = ss.EVENTNAME
+ 
+LEFT JOIN etr_audit_counts ac
+  ON ef.EVENTNAME = ac.EVENTNAME
+ 
+LEFT JOIN etr_rollup er
+  ON ef.EVENTNAME = er.EVENTNAME
+ 
+ORDER BY
+  ef.STARTDATETIME ASC,
+  ef.EVENTNAME;
+
+--  SELECT * FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_EVENT_FACT` LIMIT 3000
