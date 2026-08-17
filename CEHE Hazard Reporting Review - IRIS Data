@@ -1,0 +1,152 @@
+--standardSQL
+WITH order_tasks AS (
+  SELECT
+    OrderNumber,
+
+    -- Use the most recently updated non-null value for each field.
+    ARRAY_AGG(
+      Tasks.WorkOrderTask.Location.Address.AddressLineCombine
+      IGNORE NULLS
+      ORDER BY OrderUpdateTS DESC
+      LIMIT 1
+    )[SAFE_OFFSET(0)] AS hazard_address,
+
+    ARRAY_AGG(
+      Tasks.WorkOrderTask.eventAt
+      IGNORE NULLS
+      ORDER BY OrderUpdateTS DESC
+      LIMIT 1
+    )[SAFE_OFFSET(0)] AS oos_created,
+
+    ARRAY_AGG(
+      DATETIME(
+        Tasks.WorkOrderTask.TaskTracking.DispatchedAt,
+        "America/Chicago"
+      )
+      IGNORE NULLS
+      ORDER BY OrderUpdateTS DESC
+      LIMIT 1
+    )[SAFE_OFFSET(0)] AS dispatched_at,
+
+    -- Pull the latest available non-null En Route timestamp
+    ARRAY_AGG(
+      Tasks.WorkOrderTask.TaskTracking.EstimatedData.enRouteAt
+      IGNORE NULLS
+      ORDER BY
+        Tasks.WorkOrderTask.TaskTracking.EstimatedData.enRouteAt DESC,
+        OrderUpdateTS DESC
+      LIMIT 1
+    )[SAFE_OFFSET(0)] AS oos_enroute_at,
+
+    -- Pull the latest available non-null On Site timestamp
+    ARRAY_AGG(
+      Tasks.WorkOrderTask.TaskTracking.EstimatedData.onSiteAt
+      IGNORE NULLS
+      ORDER BY
+        Tasks.WorkOrderTask.TaskTracking.EstimatedData.onSiteAt DESC,
+        OrderUpdateTS DESC
+      LIMIT 1
+    )[SAFE_OFFSET(0)] AS oos_onsite_at,
+
+    ARRAY_AGG(
+      OrderStatus
+      IGNORE NULLS
+      ORDER BY OrderUpdateTS DESC
+      LIMIT 1
+    )[SAFE_OFFSET(0)] AS oos_order_completion_status
+
+  FROM `cnp-datafoundation-prod.EAI_ELEC_OPS.T_ELEC_ORDER_TASKS`
+  WHERE OrderUpdateTS >= TIMESTAMP("2025-10-01 00:00:00+00")
+    AND OrderUpdateTS < TIMESTAMP("2026-07-01 00:00:00+00")
+  GROUP BY OrderNumber
+),
+
+call_facts AS (
+  SELECT
+    EVENTKEY,
+    STRING_AGG(
+      DISTINCT CALLDESC,
+      " | "
+      ORDER BY CALLDESC
+    ) AS hazard_type
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_CALL_FACT`
+  GROUP BY EVENTKEY
+),
+
+actions_taken AS (
+  SELECT
+    eventname,
+    STRING_AGG(
+      DISTINCT action_taken_name,
+      " | "
+      ORDER BY action_taken_name
+    ) AS action_taken
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_ALL_ACTIONS_TAKEN`
+  GROUP BY eventname
+),
+
+service_suite AS (
+  SELECT
+    EVENTNAME,
+    ANY_VALUE(REFERRED) AS referrals_needed,
+    STRING_AGG(
+      DISTINCT CREW_NOTES,
+      " | "
+      ORDER BY CREW_NOTES
+    ) AS crew_notes
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_SERVICE_SUITE`
+  GROUP BY EVENTNAME
+),
+
+event_fact AS (
+  SELECT
+    EVENTNAME,
+    ANY_VALUE(STARTDATETIME) AS startdatetime,
+    ANY_VALUE(RESTOREDDATETIME) AS restoreddatetime,
+    ANY_VALUE(TROUBLE_LVL) AS trouble_lvl,
+    ANY_VALUE(EVENTPRIORITYNUM) AS hazard_level,
+    ANY_VALUE(EVENTKEY) AS eventkey
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_EVENT_FACT`
+  WHERE STARTDATETIME >= DATETIME("2025-10-01 00:00:00")
+    AND STARTDATETIME < DATETIME("2026-07-01 00:00:00")
+    AND EXCLUDETROUBLEFLAG = 0
+    AND MOMENTARYOUTAGEFLAG = 0
+    AND CANCELLEDFLAG = 0
+    AND PLANNEDOTGFLAG = 0
+    AND NONOUTGCALLFLAG = 0
+    AND ORPHANOUTAGEFLAG = 0
+    AND EVENTPRIORITYNUM IS NOT NULL
+    AND EVENTPRIORITYNUM != 0
+    AND SERVICECENTER NOT IN ("BV", "EV", "FB", "MV", "RP", "INDIANA")
+  GROUP BY EVENTNAME
+)
+
+SELECT
+  ef.EVENTNAME,
+  ef.startdatetime AS STARTDATETIME,
+  ef.restoreddatetime AS RESTOREDDATETIME,
+  ef.trouble_lvl AS TROUBLE_LVL,
+  ot.hazard_address AS HAZARD_ADDRESS,
+  ot.oos_created AS TIME_CREATED,
+  ef.hazard_level AS HAZARD_LEVEL,
+  cf.hazard_type AS HAZARD_TYPE,
+  act.action_taken AS ACTION_TAKEN,
+  ot.dispatched_at AS DISPATCHED_AT,
+  ot.oos_enroute_at AS TIME_ENROUTE,
+  ot.oos_onsite_at AS TIME_OMNSITE,
+  ss.referrals_needed AS REFERRALS_NEEDED,
+  ss.crew_notes AS CREW_NOTES,
+  ot.oos_order_completion_status AS COMPLETION_STATUS
+FROM event_fact AS ef
+INNER JOIN service_suite AS ss
+  ON ss.EVENTNAME = ef.EVENTNAME
+LEFT JOIN order_tasks AS ot
+  ON ot.OrderNumber = ef.EVENTNAME
+LEFT JOIN call_facts AS cf
+  ON cf.EVENTKEY = ef.eventkey
+LEFT JOIN actions_taken AS act
+  ON act.eventname = ef.EVENTNAME
+ORDER BY
+  STARTDATETIME,
+  RESTOREDDATETIME,
+  HAZARD_TYPE;
