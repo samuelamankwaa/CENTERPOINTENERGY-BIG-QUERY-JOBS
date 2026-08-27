@@ -119,3 +119,134 @@ QUALIFY ROW_NUMBER() OVER (
 ORDER BY
   ef.MAXRESTOREDDATETIME,
   ef.SERVICECENTER DESC;
+===================================================================================================================================================
+===================================================================================================================================================CST
+
+SELECT
+  COALESCE(A.OrderNumber, ef.EVENTNAME) AS Owo_Work_Order_Num,
+  DATETIME(
+    A.OrderUpdateTS,
+    'America/Chicago'
+  ) AS OrderUpdateCST,
+  A.OrderType AS Owo_Work_Order_Type,
+  A.OrderData.WorkOrderRecord.ObjectId AS Objectid,
+  A.Tasks.WorkOrderTask.OutageMtrUpd.NewDev.ServType AS Outagedevtype,
+  ef.BUILD_TYPE AS Buildtype,
+  A.OrderData.WorkOrderRecord.CurrentFeederName AS Currentfeedername,
+  A.OrderData.WorkOrderRecord.CustomerCity AS Area_Desc,
+  ef.EVENTLOCATION AS Oor_Address_1,
+  A.Tasks.WorkOrderTask.TaskTracking.EventByUserId AS Aas_Dispatched_By,
+  A.Tasks.WorkOrderTask.TaskTracking.AcknowledgedAt AS Oos_Acknowledged_At,
+  ef.FIRSTCREWDISPATCHED AS Avi_En_Route_Indicated,
+  A.Tasks.WorkOrderTask.TaskTracking.EstimatedData.enRouteAt AS Avi_On_Site_Indicated,
+  SS.CREW_COMPLETION_DATE AS Aas_Completed,
+  SS.CREW_NAME AS Lus_Name,
+  A.Tasks.WorkOrderTask.TaskTracking.EventByUserId AS Dispatcher_Name,
+  A.Tasks.WorkOrderTask.TaskTracking.EventByUserId AS Dispatcher_Logon_Id,
+  cd.CAUSECODE AS Cause_Name,
+  ARRAY_TO_STRING(
+    ARRAY(
+      SELECT DISTINCT action_taken
+      FROM UNNEST([
+        SS.ACTION_TAKEN_1,
+        SS.ACTION_TAKEN_2,
+        SS.ACTION_TAKEN_3,
+        SS.ACTION_TAKEN_4,
+        SS.ACTION_TAKEN_5,
+        SS.ACTION_TAKEN_6
+      ]) AS action_taken
+      WHERE action_taken IS NOT NULL
+    ),
+    ' . '
+  ) AS Acttakencode1,
+
+  ARRAY_TO_STRING(
+    ARRAY(
+      SELECT DISTINCT wo_action.Code
+      FROM UNNEST(A.OrderData.WorkOrderRecord.ActionsTaken.Actions) AS wo_action
+      WHERE wo_action.Code IS NOT NULL
+    ),
+    ' . '
+  ) AS Acttakencode1B,
+
+  SS.ACT_TAKEN_DEV_NUM1 AS Acttakendevnum1,
+  SS.ACT_TAKEN_RPL1 AS Acttakenrpl1,
+  SS.ACT_TAKEN_PHASE1 AS Acttakenphase1,
+  SS.ACT_TAKEN_DEV_NUM2 AS Acttakendevnum2,
+  SS.ACT_TAKEN_RPL2 AS Acttakenrpl2,
+  SS.ACT_TAKEN_PHASE2 AS Acttakenphase2,
+  SS.ACT_TAKEN_DEV_NUM3 AS Acttakendevnum3,
+  SS.ACT_TAKEN_RPL3 AS Acttakenrpl3,
+  SS.ACT_TAKEN_PHASE3 AS Acttakenphase3,
+  SS.ACT_TAKEN_DEV_NUM4 AS Acttakendevnum4,
+  SS.ACT_TAKEN_RPL4 AS Acttakenrpl4,
+  SS.ACT_TAKEN_PHASE4 AS Acttakenphase4,
+  SS.ACT_TAKEN_DEV_NUM5 AS Acttakendevnum5,
+  SS.ACT_TAKEN_RPL5 AS Acttakenrpl5,
+  SS.ACT_TAKEN_PHASE5 AS Acttakenphase5,
+  SS.ACT_TAKEN_DEV_NUM6 AS Acttakendevnum6,
+  SS.ACT_TAKEN_RPL6 AS Acttakenrpl6,
+  SS.ACT_TAKEN_PHASE6 AS Acttakenphase6,
+  SS.TRANSFORMER1_RMV_NUM AS Transformer_Removeno1,
+  SS.TRANSFORMER1_RMV_CODE AS Transformer_Removecode1,
+  SS.TRANSFORMER1_ADD_NUM AS Transformer_Addno1,
+  SS.TRANSFORMER1_ADD_CODE AS Transformer_Addcode1,
+  SS.TRANSFORMER2_RMV_NUM AS Transformer_Removeno2,
+  SS.TRANSFORMER2_RMV_CODE AS Transformer_Removecode2,
+  SS.TRANSFORMER2_ADD_NUM AS Transformer_Addno2,
+  SS.TRANSFORMER2_ADD_CODE AS Transformer_Addcode2,
+  SS.TRANSFORMER3_RMV_NUM AS Transformer_Removeno3,
+  SS.TRANSFORMER3_RMV_CODE AS Transformer_Removecode3,
+  SS.TRANSFORMER3_ADD_NUM AS Transformer_Addno3,
+  SS.TRANSFORMER3_ADD_CODE AS Transformer_Addcode3,
+  SS.REQUIRES_WO AS Capitalworkorder,
+  ef.RESTOREDDATETIME AS Restoredat,
+  A.OrderData.WorkOrderRecord.Remarks1 AS Cnpcompremark1,
+  A.OrderData.WorkOrderRecord.Remarks2 AS Cnpcompremark2,
+  A.OrderData.WorkOrderRecord.Remarks3 AS Cnpcompremark3,
+  A.OrderData.WorkOrderRecord.Remarks4 AS Cnpcompremark4
+
+FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_EVENT_FACT` AS ef
+LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_SERVICE_SUITE` AS SS
+  ON SS.EVENTNAME = ef.EVENTNAME
+LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_CAUSE_DIM` AS cd
+  ON ef.causekey = cd.causekey
+LEFT JOIN `cnp-datafoundation-prod.EAI_ELEC_OPS.T_ELEC_ORDER_TASKS` AS A
+  ON SS.EVENTNAME = A.OrderNumber
+  
+WHERE  A.OrderUpdateTS >= TIMESTAMP_TRUNC(TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 DAY), DAY)
+   AND A.OrderUpdateTS < TIMESTAMP_TRUNC(CURRENT_TIMESTAMP(), DAY)
+
+  AND ef.MAXRESTOREDDATETIME >= DATETIME(
+      DATE_SUB(CURRENT_DATE('America/Chicago'), INTERVAL 1 DAY)
+    ) 
+  AND DATETIME(A.OrderUpdateTS, 'America/Chicago') >= DATETIME(
+      DATE_SUB(CURRENT_DATE('America/Chicago'), INTERVAL 1 DAY)
+    ) 
+  AND ef.TROUBLE_LVL  IS NOT NULL
+  AND ef.MOMENTARYOUTAGEFLAG = 0
+  AND ef.ORPHANOUTAGEFLAG = 0
+  AND ef.CANCELLEDFLAG = 0
+  AND ef.servicecenter NOT IN ('BV', 'EV', 'FB', 'MV', 'RP')
+  AND ef.causekey NOT IN (43, 85, 48, 55, 17, 35, 71, 78, 27, 15)
+
+  -- Searches all six Service Suite action fields.
+  AND '314 - Rpld BU Trans' IN UNNEST([
+    SS.ACTION_TAKEN_1,
+    SS.ACTION_TAKEN_2,
+    SS.ACTION_TAKEN_3,
+    SS.ACTION_TAKEN_4,
+    SS.ACTION_TAKEN_5,
+    SS.ACTION_TAKEN_6
+  ])
+QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY
+    ef.EVENTNAME,
+    COALESCE(A.OrderNumber, ef.EVENTNAME)
+  ORDER BY
+    A.Tasks.WorkOrderTask.TaskTracking.EstimatedData.enRouteAt DESC NULLS LAST,
+    A.OrderUpdateTS DESC NULLS LAST
+) = 1
+ORDER BY
+  ef.MAXRESTOREDDATETIME,
+  ef.SERVICECENTER DESC;
