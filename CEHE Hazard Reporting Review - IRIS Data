@@ -150,3 +150,198 @@ ORDER BY
   STARTDATETIME,
   RESTOREDDATETIME,
   HAZARD_TYPE;
+
+============================================================================================================================================
+============================================================================================================================================
+--standardSQL
+WITH order_tasks AS (
+  SELECT
+    OrderNumber,
+
+    -- Use the most recently updated non-null value for each field.
+    ARRAY_AGG(
+      Tasks.WorkOrderTask.Location.Address.AddressLineCombine
+      IGNORE NULLS
+      ORDER BY OrderUpdateTS DESC
+      LIMIT 1
+    )[SAFE_OFFSET(0)] AS hazard_address,
+
+    ARRAY_AGG(
+      Tasks.WorkOrderTask.eventAt
+      IGNORE NULLS
+      ORDER BY OrderUpdateTS DESC
+      LIMIT 1
+    )[SAFE_OFFSET(0)] AS oos_created,
+
+    ARRAY_AGG(
+      DATETIME(
+        Tasks.WorkOrderTask.TaskTracking.DispatchedAt,
+        "America/Chicago"
+      )
+      IGNORE NULLS
+      ORDER BY OrderUpdateTS DESC
+      LIMIT 1
+    )[SAFE_OFFSET(0)] AS dispatched_at,
+
+    -- Pull the latest available non-null En Route timestamp
+    ARRAY_AGG(
+      Tasks.WorkOrderTask.TaskTracking.EstimatedData.enRouteAt
+      IGNORE NULLS
+      ORDER BY
+        Tasks.WorkOrderTask.TaskTracking.EstimatedData.enRouteAt DESC,
+        OrderUpdateTS DESC
+      LIMIT 1
+    )[SAFE_OFFSET(0)] AS oos_enroute_at,
+
+    -- Pull the latest available non-null On Site timestamp
+    ARRAY_AGG(
+      Tasks.WorkOrderTask.TaskTracking.EstimatedData.onSiteAt
+      IGNORE NULLS
+      ORDER BY
+        Tasks.WorkOrderTask.TaskTracking.EstimatedData.onSiteAt DESC,
+        OrderUpdateTS DESC
+      LIMIT 1
+    )[SAFE_OFFSET(0)] AS oos_onsite_at,
+
+    ARRAY_AGG(
+      OrderStatus
+      IGNORE NULLS
+      ORDER BY OrderUpdateTS DESC
+      LIMIT 1
+    )[SAFE_OFFSET(0)] AS oos_order_completion_status
+
+  FROM `cnp-datafoundation-prod.EAI_ELEC_OPS.T_ELEC_ORDER_TASKS`
+  WHERE OrderUpdateTS >= TIMESTAMP("2025-10-01 00:00:00+00")
+    AND OrderUpdateTS < TIMESTAMP("2026-07-01 00:00:00+00")
+  GROUP BY OrderNumber
+),
+
+call_facts AS (
+  SELECT
+    EVENTKEY,
+    STRING_AGG(
+      DISTINCT CALLDESC,
+      " | "
+      ORDER BY CALLDESC
+    ) AS hazard_type
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_CALL_FACT`
+  GROUP BY EVENTKEY
+),
+
+actions_taken AS (
+  SELECT
+    eventname,
+    STRING_AGG(
+      DISTINCT action_taken_name,
+      " | "
+      ORDER BY action_taken_name
+    ) AS action_taken
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_ALL_ACTIONS_TAKEN`
+  GROUP BY eventname
+),
+
+service_suite AS (
+  SELECT
+    EVENTNAME,
+    ANY_VALUE(REFERRED) AS referrals_needed,
+    STRING_AGG(
+      DISTINCT CREW_NOTES,
+      " | "
+      ORDER BY CREW_NOTES
+    ) AS crew_notes
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_SERVICE_SUITE`
+  GROUP BY EVENTNAME
+),
+order_hist AS (SELECT
+  HOST_ORDER_NUMBER,
+  PROCESS_ID AS EVENTNAME,
+  LAST_CHANGE_DTTM,
+  CREATION_DATE,
+  CREATION_TIME,
+  DATETIME(CREATION_DATE, PARSE_TIME('%H:%M:%S', CREATION_TIME)) AS CREATION_DATETIME,
+  DISPATCH_DATE,
+  DISPATCH_TIME,
+  DATETIME(DISPATCH_DATE, PARSE_TIME('%H:%M:%S', DISPATCH_TIME)) AS DISPATCH_DATETIME,
+  ENROUTE_DATE,
+  ENROUTE_TIME,
+  DATETIME(ENROUTE_DATE, PARSE_TIME('%H:%M:%S', ENROUTE_TIME)) AS ENROUTE_DATETIME,
+  ONSITE_DATE,
+  ONSITE_TIME,
+  DATETIME(ONSITE_DATE, PARSE_TIME('%H:%M:%S', ONSITE_TIME)) AS ONSITE_DATETIME,
+  MIN(DATETIME(ONSITE_DATE, PARSE_TIME('%H:%M:%S', ONSITE_TIME))) 
+    OVER (PARTITION BY HOST_ORDER_NUMBER) AS FIRST_CREW_ONSITE_TIME,
+  MAX(DATETIME(ONSITE_DATE, PARSE_TIME('%H:%M:%S', ONSITE_TIME))) 
+    OVER (PARTITION BY HOST_ORDER_NUMBER) AS LAST_CREW_ONSITE_TIME,
+  COMPLETE_DATE,
+  COMPLETE_TIME,
+  JOB_CODE_DESCRIPTION,
+  ESIID,
+  TECHNICIAN_ID,
+  TECHNICIAN_NAME,
+  CMPL_STATUS AS COMPLETION_STATUS,
+  LAST_STATUS
+FROM `cnp-datafoundation-prod.ELECTRIC_OPS.T_STG_MBL_TECH_ROUTE_HIST`
+WHERE LAST_CHANGE_DTTM >= DATETIME("2025-10-01 00:00:00")
+  AND LAST_CHANGE_DTTM < DATETIME("2026-07-01 00:00:00")
+QUALIFY ROW_NUMBER() OVER (PARTITION BY PROCESS_ID ORDER BY LAST_CHANGE_DTTM DESC) = 1
+ORDER BY LAST_CHANGE_DTTM DESC),
+
+event_fact AS (
+  SELECT
+    EVENTNAME,
+    ANY_VALUE(STARTDATETIME) AS startdatetime,
+    ANY_VALUE(RESTOREDDATETIME) AS restoreddatetime,
+    ANY_VALUE(TROUBLE_LVL) AS trouble_lvl,
+    ANY_VALUE(EVENTPRIORITYNUM) AS hazard_level,
+    ANY_VALUE(EVENTKEY) AS eventkey
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_EVENT_FACT`
+  WHERE STARTDATETIME >= DATETIME("2025-10-01 00:00:00")
+    AND STARTDATETIME < DATETIME("2026-07-01 00:00:00")
+    AND EXCLUDETROUBLEFLAG = 0
+    AND MOMENTARYOUTAGEFLAG = 0
+    AND CANCELLEDFLAG = 0
+    AND PLANNEDOTGFLAG = 0
+    AND NONOUTGCALLFLAG = 0
+    AND ORPHANOUTAGEFLAG = 0
+    AND EVENTPRIORITYNUM IS NOT NULL
+    AND EVENTPRIORITYNUM != 0
+    AND SERVICECENTER NOT IN ("BV", "EV", "FB", "MV", "RP", "INDIANA")
+  GROUP BY EVENTNAME
+)
+
+SELECT
+  ef.EVENTNAME,
+  ef.startdatetime AS STARTDATETIME,
+  ef.restoreddatetime AS RESTOREDDATETIME,
+  ef.trouble_lvl AS TROUBLE_LVL,
+  ot.hazard_address AS HAZARD_ADDRESS,
+  oh.CREATION_DATETIME,
+  ef.hazard_level AS HAZARD_LEVEL,
+  cf.hazard_type AS HAZARD_TYPE,
+  act.action_taken AS ACTION_TAKEN,
+  oh.DISPATCH_DATETIME,
+  oh.ENROUTE_DATETIME,
+  oh.ONSITE_DATETIME,
+  oh.FIRST_CREW_ONSITE_TIME,
+  oh.LAST_CREW_ONSITE_TIME,
+  ss.referrals_needed AS REFERRALS_NEEDED,
+  oh.TECHNICIAN_ID AS CREW_ID,
+  oh.TECHNICIAN_NAME AS CREW_NAME,
+  ss.crew_notes AS CREW_NOTES,
+  oh.COMPLETION_STATUS,
+  oh.LAST_STATUS
+FROM event_fact AS ef
+INNER JOIN service_suite AS ss
+  ON ss.EVENTNAME = ef.EVENTNAME
+LEFT JOIN order_tasks AS ot
+  ON ot.OrderNumber = ef.EVENTNAME
+LEFT JOIN call_facts AS cf
+  ON cf.EVENTKEY = ef.eventkey
+LEFT JOIN actions_taken AS act
+  ON act.eventname = ef.EVENTNAME
+LEFT JOIN order_hist AS oh
+  ON oh.EVENTNAME = ef.EVENTNAME
+ORDER BY
+  STARTDATETIME,
+  RESTOREDDATETIME,
+  HAZARD_TYPE;
