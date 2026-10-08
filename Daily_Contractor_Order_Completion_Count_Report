@@ -1,0 +1,214 @@
+WITH base AS (
+  SELECT
+    A.OrderNumber AS OrderNumber,
+    DATETIME(A.OrderUpdateTS, 'America/Chicago') AS Order_Update_datetime,
+
+    CASE
+      WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1001' THEN 'SYS - TBL Crew'
+      WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1004' THEN 'Meter Lab'
+      WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1005' THEN 'South Houston'
+      WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1006' THEN 'Spring Branch'
+      WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1007' THEN 'Sugar Land'
+      WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1008' THEN '3 PH Underground'
+      WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1012' THEN 'Baytown'
+      WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1013' THEN 'Bellaire'
+      WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1017' THEN 'Cypress'
+      WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1019' THEN 'Katy'
+      WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1020' THEN 'HO Clarke'
+      WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1021' THEN 'Greenspoint'
+      WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1022' THEN 'Galveston'
+      WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1023' THEN 'Fort Bend'
+      WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1024' THEN 'Humble'
+      WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1025' THEN 'Harrisburg'
+      WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1028' THEN 'CEHE-TRG-HOC'
+      WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1041' THEN 'Heavy Construction NW'
+      WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1042' THEN 'Heavy Construction SW'
+      WHEN A.Tasks.WorkOrderTask.Organization.DispatchArea = '1043' THEN 'Heavy Construction SE'
+      ELSE A.Tasks.WorkOrderTask.Organization.DispatchArea
+    END AS SvC_Cntr,
+    A.OrderType AS Completed_CSOs,
+    A.Tasks.WorkOrderTask.Location.Address.AddressLineCombine AS Address,
+    A.Tasks.WorkOrderTask.TaskData.OrderRecord.CompStatus AS CompStatus,
+    A.Tasks.WorkOrderTask.Activities.Activity.ActivityData.ElecOrder.TurnDwnCd1 AS TurnDwnCd1,
+    A.Tasks.WorkOrderTask.TaskData.OrderRecord.CsrRemarks AS CsrRemarks,
+    A.Tasks.WorkOrderTask.TaskTracking.CompletedAt.Value AS TaskCompletedAt,
+
+    SAFE.TIMESTAMP(
+      A.Tasks.WorkOrderTask.TaskTracking.CompletedAt.Value
+    ) AS UTC_TS,
+
+    DATETIME(
+      SAFE.TIMESTAMP(
+        A.Tasks.WorkOrderTask.TaskTracking.CompletedAt.Value
+      ),
+      'America/Chicago'
+    ) AS TaskCompletedAtCST,
+
+    A.Tasks.WorkOrderTask.Activities.Activity.ActivityTracking.CompletedByUserId
+      AS CompletedByUserId,
+
+    CASE
+      WHEN STARTS_WITH(
+        A.Tasks.WorkOrderTask.TaskAssignment.UserId,
+        '009'
+      ) THEN 'Y'
+      ELSE 'N'
+    END AS Contractor
+
+  FROM `cnp-datafoundation-prod.EAI_ELEC_OPS.T_ELEC_ORDER_TASKS` AS A
+
+  WHERE A.OrderUpdateTS >= TIMESTAMP('2024-08-01')
+    AND A.OrderUpdateTS < TIMESTAMP('2026-10-29')
+
+    AND A.Tasks.WorkOrderTask.eventType = 'Completed'
+
+    AND A.Tasks.WorkOrderTask.TaskTracking.CompletedAt.Value
+      IS NOT NULL
+
+    AND A.Tasks.WorkOrderTask.TaskData.OrderRecord.CompStatus IN (
+      'CMPL',
+      'TRDN'
+    )
+
+  -- Keep only the latest base-table row for each OrderNumber.
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY A.OrderNumber
+    ORDER BY A.OrderUpdateTS DESC
+  ) = 1
+),
+
+lab_user AS (
+  SELECT
+    CAST(LOGON_ID AS STRING) AS LOGON_ID,
+    NAME,
+    UPDATE_STAMP
+
+  FROM `cnp-datafoundation-prod.TECHOPS_SERVICE_SUITE_HDB_TABLES.SS98HEOP_HDB_LAB_USER`
+
+  WHERE LOGON_ID IS NOT NULL
+
+  -- Keep the latest user record for each LOGON_ID.
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY CAST(LOGON_ID AS STRING)
+    ORDER BY UPDATE_STAMP DESC
+  ) = 1
+),
+
+deduplicated_report AS (
+  SELECT
+    ba.OrderNumber,
+    ba.Order_Update_datetime,
+    ba.SvC_Cntr,
+    ba.Completed_CSOs AS Ordertype,
+    ba.TaskCompletedAt,
+    ba.TaskCompletedAtCST,
+    ba.CompletedByUserId,
+
+    -- NAME replaces TECHNICIAN_NAME.
+    lu.NAME AS TECHNICIAN_NAME,
+
+    REGEXP_EXTRACT(
+  TRIM(lu.NAME),
+  r'^([A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)*)-[^-]+,'
+) AS Vendor_Code,
+
+   CASE
+  WHEN REGEXP_EXTRACT(
+    TRIM(lu.NAME),
+    r'^([A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)*)-[^-]+,'
+  ) LIKE '%MPT%' THEN 'MP Technologies'
+
+  WHEN REGEXP_EXTRACT(
+    TRIM(lu.NAME),
+    r'^([A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)*)-[^-]+,'
+  ) LIKE '%BTS%' THEN 'Bright Star'
+
+  WHEN REGEXP_EXTRACT(
+    TRIM(lu.NAME),
+    r'^([A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)*)-[^-]+,'
+  ) LIKE '%FLP%' THEN 'Frontline'
+
+  WHEN REGEXP_EXTRACT(
+    TRIM(lu.NAME),
+    r'^([A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)*)-[^-]+,'
+  ) LIKE '%LEM%' THEN 'L.E. Myers'
+
+  WHEN REGEXP_EXTRACT(
+    TRIM(lu.NAME),
+    r'^([A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)*)-[^-]+,'
+  ) LIKE '%LP%' THEN 'Line Pro'
+
+  WHEN REGEXP_EXTRACT(
+    TRIM(lu.NAME),
+    r'^([A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)*)-[^-]+,'
+  ) LIKE '%NHP%' THEN 'North Houston'
+
+  WHEN REGEXP_EXTRACT(
+    TRIM(lu.NAME),
+    r'^([A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)*)-[^-]+,'
+  ) LIKE '%PWC%' THEN 'PowerGrid'
+
+  ELSE REGEXP_EXTRACT(
+    TRIM(lu.NAME),
+    r'^([A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)*)-[^-]+,'
+  )
+END AS Vendor_Name,
+
+    ba.Contractor,
+    ba.Address,
+    ba.CompStatus,
+    ba.CsrRemarks
+
+  FROM base AS ba
+
+  LEFT JOIN lab_user AS lu
+    ON TRIM(CAST(lu.LOGON_ID AS STRING))
+       = TRIM(CAST(ba.CompletedByUserId AS STRING))
+
+  WHERE ba.Contractor = 'Y'
+
+  -- Uncomment to return only users found in LAB_USER.
+  -- AND lu.NAME IS NOT NULL
+),
+
+daily_contractor_counts AS (
+  SELECT
+    DATE(TaskCompletedAtCST) AS CompletionDate,
+    COUNT(DISTINCT CompletedByUserId)
+      AS Number_of_Contractors_that_day
+
+  FROM deduplicated_report
+
+  GROUP BY
+    CompletionDate
+)
+
+SELECT
+  dr.OrderNumber,
+  dr.Order_Update_datetime,
+  dr.SvC_Cntr,
+  dr.Ordertype,
+  dr.TaskCompletedAt,
+  dr.TaskCompletedAtCST,
+  dr.CompletedByUserId,
+  dr.TECHNICIAN_NAME as Technician_Name,
+  dr.Vendor_Code,
+  dr.Vendor_Name,
+  dr.Contractor,
+  dc.Number_of_Contractors_that_day,
+  dr.Address,
+  dr.CompStatus,
+  dr.CsrRemarks
+
+FROM deduplicated_report AS dr
+
+LEFT JOIN daily_contractor_counts AS dc
+  ON dc.CompletionDate = DATE(dr.TaskCompletedAtCST)
+
+ORDER BY
+  dr.Order_Update_datetime,
+  dr.OrderNumber;
+
+
+
+  --SELECT * FROM cnp-datafoundation-prod.TECHOPS_SERVICE_SUITE_HDB_TABLES.SS98HEOP_HDB_LAB_USER LIMIT 2000
