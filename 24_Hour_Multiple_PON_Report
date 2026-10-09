@@ -1,0 +1,163 @@
+WITH ams_calls AS (
+  SELECT DISTINCT
+    cf.EVENTKEY,
+    cf.CALLKEY,
+    cf.RECDATETIME
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_CALL_FACT` cf
+  WHERE cf.CALLERTYPE = 'AMS'
+    AND cf.RECDATETIME IS NOT NULL
+),
+
+ams_calls_with_previous AS (
+  SELECT
+    EVENTKEY,
+    CALLKEY,
+    RECDATETIME,
+
+    LAG(RECDATETIME) OVER (
+      PARTITION BY EVENTKEY
+      ORDER BY RECDATETIME, CALLKEY
+    ) AS PREVIOUS_RECDATETIME
+
+  FROM ams_calls
+),
+
+ams_24_hour_flag AS (
+  SELECT
+    EVENTKEY,
+
+    IF(
+      COUNT(DISTINCT CALLKEY) > 1
+      AND COUNTIF(
+        PREVIOUS_RECDATETIME IS NOT NULL
+        AND DATETIME_DIFF(
+          RECDATETIME,
+          PREVIOUS_RECDATETIME,
+          SECOND
+        ) <= 86400
+      ) > 0,
+      'Y',
+      'N'
+    ) AS `24_HR_NEW_PON`
+
+  FROM ams_calls_with_previous
+  GROUP BY EVENTKEY
+),
+
+only_ams_events AS (
+  SELECT
+    cf.EVENTKEY
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_CALL_FACT` cf
+  GROUP BY cf.EVENTKEY
+  HAVING COUNT(DISTINCT cf.CALLERTYPE) = 1
+     AND MAX(cf.CALLERTYPE) = 'AMS'
+),
+
+ranked_events AS (
+  SELECT
+    ef.EVENTNAME,
+    cl.CUSTSUPPLYLINKID AS ESIID,
+    ef.STARTDATETIME,
+    ef.RESTOREDDATETIME,
+    al.OPERATOR_ID,
+
+    REGEXP_EXTRACT(
+      al.NEW_VALUE,
+      r'Status:([^;]+)'
+    ) AS STATUS,
+
+    ef.SERVICECENTER,
+    ef.TROUBLE_LVL,
+    cd.CAUSECODE,
+    cf.CALLERTYPE,
+    cf.RECDATETIME AS CALLTIME,
+    cf.CALLCODE,
+    ef.NUMCUSTDEENERGIZED AS NUM_OF_CUSTOMERS_AFFECTED,
+    omsat.ACTION_TAKEN,
+     COALESCE(
+      a24.`24_HR_NEW_PON`,
+      'N'
+    ) AS `24_HR_NEW_PON`,
+    ef.OPERATORCOMMENTS AS COMMENTS,
+    ef.DEVICENAME,
+    ef.DURATIONHM,
+
+    ROW_NUMBER() OVER (
+      PARTITION BY ef.EVENTNAME
+      ORDER BY
+        ss.ACTION_TAKEN_1 DESC,
+        cf.NO_CALLS DESC
+    ) AS row_num
+
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_EVENT_FACT` ef
+
+  INNER JOIN only_ams_events oae
+    ON ef.EVENTKEY = oae.EVENTKEY
+
+  LEFT JOIN ams_24_hour_flag a24
+    ON ef.EVENTKEY = a24.EVENTKEY
+
+  LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_SERVICE_SUITE` ss
+    ON ef.EVENTNAME = ss.EVENTNAME
+
+  LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_CALL_FACT` cf
+    ON cf.EVENTKEY = ef.EVENTKEY
+
+  LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_GAP_AUDIT_LOG` al
+    ON al.EVENTNAME = ef.EVENTNAME
+
+  LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_CUSTAFFECTED_INT` ct
+    ON ct.GROUPEVENTKEY = ef.GROUPEVENTKEY
+
+  LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_CAUSE_DIM` cd
+    ON ef.CAUSEKEY = cd.CAUSEKEY
+
+  LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_CUSTSUPPLYLINK_FACT` cl
+    ON cl.CUSTKEY = ct.CUSTKEY
+
+  LEFT JOIN (
+    SELECT
+      EVENTNAME,
+
+      STRING_AGG(
+        DISTINCT ACTION_TAKEN_NAME,
+        ' , '
+        ORDER BY ACTION_TAKEN_NAME
+      ) AS ACTION_TAKEN
+
+    FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_ALL_ACTIONS_TAKEN`
+
+    GROUP BY EVENTNAME
+  ) omsat
+    ON ef.EVENTNAME = omsat.EVENTNAME
+
+  WHERE ef.STARTDATETIME
+        BETWEEN DATETIME('2026-01-01 00:00:00')
+            AND DATETIME('2026-10-08 23:59:59')
+
+    AND REGEXP_EXTRACT(
+          al.NEW_VALUE,
+          r'Status:([^;]+)'
+        ) = 'Restored'
+
+    AND ef.EXCLUDETROUBLEFLAG = 0
+    AND ef.MOMENTARYOUTAGEFLAG = 0
+    AND ef.CANCELLEDFLAG = 0
+    AND ef.PLANNEDOTGFLAG = 0
+    AND ef.NONOUTGCALLFLAG = 0
+    AND ef.ORPHANOUTAGEFLAG = 0
+
+    AND ef.SERVICECENTER NOT IN (
+      'BV',
+      'EV',
+      'FB',
+      'MV',
+      'RP',
+      'INDIANA'
+    )
+)
+
+SELECT * EXCEPT(row_num)
+FROM ranked_events
+WHERE row_num = 1
+ORDER BY STARTDATETIME;
