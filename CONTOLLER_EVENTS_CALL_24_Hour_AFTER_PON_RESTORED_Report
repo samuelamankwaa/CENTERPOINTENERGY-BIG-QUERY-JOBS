@@ -1019,3 +1019,566 @@ ORDER BY
   CALLTIME,
   EVENTNAME,
   ESIID;
+========================================================================================================================================================================
+========================================================================================================================================================================
+WITH only_ams_eventkeys AS (
+  /*
+    An initial EVENTKEY qualifies only when every call associated
+    with it has CALLERTYPE = AMS.
+
+    NULL, blank, and non-AMS CALLERTYPE values disqualify the event.
+  */
+  SELECT
+    cf.EVENTKEY
+
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_CALL_FACT` cf
+
+  GROUP BY
+    cf.EVENTKEY
+
+  HAVING COUNT(*) > 0
+
+     AND COUNTIF(
+           UPPER(TRIM(COALESCE(cf.CALLERTYPE, ''))) = 'AMS'
+         ) = COUNT(*)
+),
+
+event_esiids AS (
+  /*
+    Connect qualifying AMS-only events to their ESIIDs.
+
+    Duplicate relationships may still occur here, but they will
+    be removed by EVENTNAME in the final output.
+  */
+  SELECT
+    ef.EVENTKEY,
+    ef.EVENTNAME,
+    cl.CUSTSUPPLYLINKID AS ESIID,
+    ef.STARTDATETIME,
+    ef.RESTOREDDATETIME
+
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_EVENT_FACT` ef
+
+  INNER JOIN only_ams_eventkeys only_ams
+    ON only_ams.EVENTKEY = ef.EVENTKEY
+
+  LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_CUSTAFFECTED_INT` ct
+    ON ct.GROUPEVENTKEY = ef.GROUPEVENTKEY
+
+  LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_CUSTSUPPLYLINK_FACT` cl
+    ON cl.CUSTKEY = ct.CUSTKEY
+
+  WHERE ef.STARTDATETIME
+        BETWEEN DATETIME('2026-01-01 00:00:00')
+            AND DATETIME('2026-10-08 23:59:59')
+
+    AND ef.EXCLUDETROUBLEFLAG = 0
+    AND ef.MOMENTARYOUTAGEFLAG = 0
+    AND ef.CANCELLEDFLAG = 0
+    AND ef.PLANNEDOTGFLAG = 0
+    AND ef.NONOUTGCALLFLAG = 0
+    AND ef.ORPHANOUTAGEFLAG = 0
+
+    AND ef.SERVICECENTER NOT IN (
+      'BV',
+      'EV',
+      'FB',
+      'MV',
+      'RP',
+      'INDIANA'
+    )
+
+    AND cl.CUSTSUPPLYLINKID IS NOT NULL
+),
+
+initial_ams_event_calls AS (
+  /*
+    Retrieve calls for qualifying AMS-only initial events.
+  */
+  SELECT
+    ee.EVENTKEY,
+    ee.EVENTNAME,
+    ee.ESIID,
+    ee.STARTDATETIME,
+    ee.RESTOREDDATETIME,
+
+    cf.CALLKEY,
+    cf.CALLERTYPE,
+    cf.RECDATETIME AS CALLTIME,
+    cf.CALLCODE,
+    cf.NO_CALLS
+
+  FROM event_esiids ee
+
+  INNER JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_CALL_FACT` cf
+    ON cf.EVENTKEY = ee.EVENTKEY
+
+  WHERE cf.RECDATETIME IS NOT NULL
+    AND UPPER(TRIM(cf.CALLERTYPE)) = 'AMS'
+),
+
+ams_calls_ranked AS (
+  /*
+    Rank AMS calls for each ESIID.
+
+    AMS_CALL_RANK = 1 identifies the first qualifying AMS call
+    for that ESIID.
+  */
+  SELECT
+    EVENTKEY,
+    EVENTNAME,
+    ESIID,
+    STARTDATETIME,
+    RESTOREDDATETIME,
+
+    CALLKEY,
+    CALLERTYPE,
+    CALLTIME,
+    CALLCODE,
+    NO_CALLS,
+
+    ROW_NUMBER() OVER (
+      PARTITION BY ESIID
+      ORDER BY
+        CALLTIME,
+        CAST(EVENTNAME AS STRING),
+        CALLKEY
+    ) AS AMS_CALL_RANK
+
+  FROM initial_ams_event_calls
+),
+
+first_ams_call_per_esiid AS (
+  /*
+    Keep the earliest AMS call for each ESIID.
+  */
+  SELECT
+    EVENTKEY AS FIRST_EVENTKEY,
+    EVENTNAME AS FIRST_EVENTNAME,
+    ESIID,
+
+    STARTDATETIME AS FIRST_STARTDATETIME,
+    RESTOREDDATETIME AS FIRST_RESTOREDDATETIME,
+
+    CALLKEY AS FIRST_AMS_CALLKEY,
+    CALLTIME AS FIRST_AMS_CALLTIME,
+    CALLCODE AS FIRST_AMS_CALLCODE,
+    NO_CALLS AS FIRST_AMS_NO_CALLS
+
+  FROM ams_calls_ranked
+
+  WHERE AMS_CALL_RANK = 1
+),
+
+all_later_event_esiids AS (
+  /*
+    Build possible later-event relationships.
+
+    Later events do not have to be AMS-only.
+  */
+  SELECT DISTINCT
+    ef.EVENTKEY,
+    ef.EVENTNAME,
+    cl.CUSTSUPPLYLINKID AS ESIID,
+    ef.STARTDATETIME,
+    ef.RESTOREDDATETIME
+
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_EVENT_FACT` ef
+
+  LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_CUSTAFFECTED_INT` ct
+    ON ct.GROUPEVENTKEY = ef.GROUPEVENTKEY
+
+  LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_CUSTSUPPLYLINK_FACT` cl
+    ON cl.CUSTKEY = ct.CUSTKEY
+
+  WHERE ef.STARTDATETIME
+        BETWEEN DATETIME('2026-01-01 00:00:00')
+            AND DATETIME_ADD(
+                  DATETIME('2026-10-08 23:59:59'),
+                  INTERVAL 24 HOUR
+                )
+
+    AND ef.EXCLUDETROUBLEFLAG = 0
+    AND ef.MOMENTARYOUTAGEFLAG = 0
+    AND ef.CANCELLEDFLAG = 0
+    AND ef.PLANNEDOTGFLAG = 0
+    AND ef.NONOUTGCALLFLAG = 0
+    AND ef.ORPHANOUTAGEFLAG = 0
+
+    AND ef.SERVICECENTER NOT IN (
+      'BV',
+      'EV',
+      'FB',
+      'MV',
+      'RP',
+      'INDIANA'
+    )
+
+    AND cl.CUSTSUPPLYLINKID IS NOT NULL
+),
+
+all_later_event_calls AS (
+  /*
+    Retrieve calls of every CALLERTYPE for possible later events.
+  */
+  SELECT DISTINCT
+    later_event.EVENTKEY,
+    later_event.EVENTNAME,
+    later_event.ESIID,
+    later_event.STARTDATETIME,
+    later_event.RESTOREDDATETIME,
+
+    cf.CALLKEY,
+    cf.CALLERTYPE,
+    cf.RECDATETIME AS CALLTIME,
+    cf.CALLCODE,
+    cf.NO_CALLS
+
+  FROM all_later_event_esiids later_event
+
+  INNER JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_CALL_FACT` cf
+    ON cf.EVENTKEY = later_event.EVENTKEY
+
+  WHERE cf.RECDATETIME IS NOT NULL
+),
+
+qualifying_later_calls AS (
+  /*
+    A later call qualifies when:
+      1. It has the same ESIID.
+      2. It belongs to a different EVENTKEY.
+      3. It occurs after the initial event's restoration.
+      4. It occurs less than 24 hours after the initial AMS call.
+      5. Its CALLERTYPE can be any value.
+  */
+  SELECT DISTINCT
+    first_call.ESIID,
+
+    first_call.FIRST_EVENTKEY,
+    first_call.FIRST_EVENTNAME,
+    first_call.FIRST_AMS_CALLTIME,
+    first_call.FIRST_RESTOREDDATETIME,
+
+    later_call.EVENTKEY AS LATER_EVENTKEY,
+    later_call.EVENTNAME AS LATER_EVENTNAME,
+    later_call.CALLKEY AS LATER_CALLKEY,
+    later_call.CALLERTYPE AS LATER_CALLERTYPE,
+    later_call.CALLTIME AS LATER_CALLTIME
+
+  FROM first_ams_call_per_esiid first_call
+
+  INNER JOIN all_later_event_calls later_call
+    ON later_call.ESIID = first_call.ESIID
+
+   -- Must be a different event.
+   AND later_call.EVENTKEY != first_call.FIRST_EVENTKEY
+
+   -- Must occur after the initial event was restored.
+   AND later_call.CALLTIME >
+       first_call.FIRST_RESTOREDDATETIME
+
+   -- Must occur after the initial AMS call.
+   AND DATETIME_DIFF(
+         later_call.CALLTIME,
+         first_call.FIRST_AMS_CALLTIME,
+         SECOND
+       ) > 0
+
+   -- Must occur less than 24 hours after the initial AMS call.
+   AND DATETIME_DIFF(
+         later_call.CALLTIME,
+         first_call.FIRST_AMS_CALLTIME,
+         SECOND
+       ) < 86400
+),
+
+later_event_summary AS (
+  /*
+    Create one later-event summary for each initial EVENTKEY/ESIID.
+  */
+  SELECT
+    FIRST_EVENTKEY,
+    ESIID,
+
+    STRING_AGG(
+      DISTINCT CAST(LATER_EVENTNAME AS STRING),
+      ', '
+      ORDER BY CAST(LATER_EVENTNAME AS STRING)
+    ) AS RELATED_LATER_EVENTS,
+
+    STRING_AGG(
+      DISTINCT COALESCE(
+        NULLIF(TRIM(LATER_CALLERTYPE), ''),
+        'UNKNOWN'
+      ),
+      ', '
+      ORDER BY COALESCE(
+        NULLIF(TRIM(LATER_CALLERTYPE), ''),
+        'UNKNOWN'
+      )
+    ) AS RELATED_LATER_CALLERTYPES,
+
+    MIN(LATER_CALLTIME) AS FIRST_LATER_CALLTIME,
+
+    COUNT(
+      DISTINCT LATER_EVENTKEY
+    ) AS RELATED_LATER_EVENT_COUNT
+
+  FROM qualifying_later_calls
+
+  GROUP BY
+    FIRST_EVENTKEY,
+    ESIID
+),
+
+new_event_after_restored_flag AS (
+  /*
+    A Y indicates that a qualifying later event exists.
+  */
+  SELECT
+    first_call.FIRST_EVENTKEY AS EVENTKEY,
+    first_call.ESIID,
+
+    IF(
+      later.FIRST_EVENTKEY IS NOT NULL,
+      'Y',
+      'N'
+    ) AS `24_HR_NEW_EVENT_AFTER_RESTORED_PON`,
+
+    later.RELATED_LATER_EVENTS,
+    later.RELATED_LATER_CALLERTYPES,
+    later.FIRST_LATER_CALLTIME,
+    later.RELATED_LATER_EVENT_COUNT
+
+  FROM first_ams_call_per_esiid first_call
+
+  LEFT JOIN later_event_summary later
+    ON later.FIRST_EVENTKEY = first_call.FIRST_EVENTKEY
+   AND later.ESIID = first_call.ESIID
+),
+
+cleaned_audit_records AS (
+  /*
+    Clean OPERATOR_ID by removing:
+      - AMS
+      - SCADA
+      - Numbers
+      - Leading and trailing non-letter characters
+      - Blank results
+  */
+  SELECT
+    al.EVENTNAME,
+
+    NULLIF(
+      TRIM(
+        REGEXP_REPLACE(
+          REGEXP_REPLACE(
+            REGEXP_REPLACE(
+              CAST(al.OPERATOR_ID AS STRING),
+
+              r'(?i)\b(?:AMS|SCADA)\b',
+              ''
+            ),
+
+            r'[0-9]+',
+            ''
+          ),
+
+          r'^[^A-Za-z]+|[^A-Za-z]+$',
+          ''
+        )
+      ),
+      ''
+    ) AS CLEAN_OPERATOR_ID,
+
+    REGEXP_EXTRACT(
+      al.NEW_VALUE,
+      r'Status:([^;]+)'
+    ) AS STATUS
+
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_GAP_AUDIT_LOG` al
+
+  WHERE REGEXP_EXTRACT(
+          al.NEW_VALUE,
+          r'Status:([^;]+)'
+        ) = 'Restored'
+),
+
+restored_audit_records AS (
+  /*
+    Keep one valid restored audit record for each EVENTNAME.
+  */
+  SELECT
+    EVENTNAME,
+    CLEAN_OPERATOR_ID AS OPERATOR_ID,
+    STATUS
+
+  FROM cleaned_audit_records
+
+  WHERE CLEAN_OPERATOR_ID IS NOT NULL
+    AND TRIM(CLEAN_OPERATOR_ID) != ''
+
+    AND REGEXP_CONTAINS(
+          CLEAN_OPERATOR_ID,
+          r'[A-Za-z]'
+        )
+
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY EVENTNAME
+    ORDER BY CLEAN_OPERATOR_ID
+  ) = 1
+),
+
+actions_taken AS (
+  /*
+    Combine action-taken descriptions by EVENTNAME.
+  */
+  SELECT
+    EVENTNAME,
+
+    STRING_AGG(
+      DISTINCT ACTION_TAKEN_NAME,
+      ' , '
+      ORDER BY ACTION_TAKEN_NAME
+    ) AS ACTION_TAKEN
+
+  FROM `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_ALL_ACTIONS_TAKEN`
+
+  GROUP BY
+    EVENTNAME
+),
+
+report_rows AS (
+  /*
+    Assemble possible report rows.
+
+    Duplicates caused by multiple ESIID associations may still
+    exist at this stage.
+  */
+  SELECT
+    ef.EVENTNAME,
+    event_es.ESIID,
+
+    ef.STARTDATETIME,
+    ef.RESTOREDDATETIME,
+
+    audit.OPERATOR_ID,
+    audit.STATUS,
+
+    ef.SERVICECENTER,
+    ef.TROUBLE_LVL,
+    cd.CAUSECODE,
+
+    first_call_record.CALLERTYPE,
+    first_call_record.RECDATETIME AS CALLTIME,
+    first_call_record.CALLCODE,
+
+    ef.NUMCUSTDEENERGIZED AS NUM_OF_CUSTOMERS_AFFECTED,
+
+    actions.ACTION_TAKEN,
+
+    flag.`24_HR_NEW_EVENT_AFTER_RESTORED_PON`,
+
+    flag.RELATED_LATER_EVENTS,
+    flag.RELATED_LATER_CALLERTYPES,
+    flag.FIRST_LATER_CALLTIME,
+    flag.RELATED_LATER_EVENT_COUNT,
+
+    ef.OPERATORCOMMENTS AS COMMENTS,
+    ef.DEVICENAME,
+    ef.DURATIONHM
+
+  FROM event_esiids event_es
+
+  INNER JOIN first_ams_call_per_esiid first_call
+    ON first_call.FIRST_EVENTKEY = event_es.EVENTKEY
+   AND first_call.ESIID = event_es.ESIID
+
+  INNER JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_EVENT_FACT` ef
+    ON ef.EVENTKEY = event_es.EVENTKEY
+
+  /*
+    Join to the selected first AMS CALLKEY so displayed call fields
+    come from the original AMS call.
+  */
+  INNER JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_CALL_FACT` first_call_record
+    ON first_call_record.EVENTKEY = first_call.FIRST_EVENTKEY
+   AND first_call_record.CALLKEY = first_call.FIRST_AMS_CALLKEY
+
+  INNER JOIN new_event_after_restored_flag flag
+    ON flag.EVENTKEY = first_call.FIRST_EVENTKEY
+   AND flag.ESIID = first_call.ESIID
+
+  INNER JOIN restored_audit_records audit
+    ON audit.EVENTNAME = ef.EVENTNAME
+
+  LEFT JOIN `cnp-datafoundation-prod.TECHOPS_FOCALPOINT_VIEWS.V_OMS_CAUSE_DIM` cd
+    ON cd.CAUSEKEY = ef.CAUSEKEY
+
+  LEFT JOIN actions_taken actions
+    ON actions.EVENTNAME = ef.EVENTNAME
+
+  WHERE ef.STARTDATETIME
+        BETWEEN DATETIME('2026-01-01 00:00:00')
+            AND DATETIME('2026-10-08 23:59:59')
+
+    -- Keep initial AMS-only events with qualifying later events.
+    AND flag.`24_HR_NEW_EVENT_AFTER_RESTORED_PON` = 'Y'
+
+    -- Confirm that the displayed initial call is AMS.
+    AND UPPER(TRIM(first_call_record.CALLERTYPE)) = 'AMS'
+
+    AND ef.EXCLUDETROUBLEFLAG = 0
+    AND ef.MOMENTARYOUTAGEFLAG = 0
+    AND ef.CANCELLEDFLAG = 0
+    AND ef.PLANNEDOTGFLAG = 0
+    AND ef.NONOUTGCALLFLAG = 0
+    AND ef.ORPHANOUTAGEFLAG = 0
+
+    AND ef.SERVICECENTER NOT IN (
+      'BV',
+      'EV',
+      'FB',
+      'MV',
+      'RP',
+      'INDIANA'
+    )
+),
+
+deduplicated_events AS (
+  /*
+    Remove duplicate EVENTNAME records.
+
+    If an EVENTNAME is associated with multiple qualifying ESIIDs,
+    retain the row with:
+      1. The greatest number of related later events.
+      2. The earliest later call.
+      3. The earliest original AMS call.
+      4. The lowest ESIID as the final tie-breaker.
+  */
+  SELECT
+    *,
+
+    ROW_NUMBER() OVER (
+      PARTITION BY EVENTNAME
+      ORDER BY
+        RELATED_LATER_EVENT_COUNT DESC,
+        FIRST_LATER_CALLTIME,
+        CALLTIME,
+        ESIID
+    ) AS event_row_num
+
+  FROM report_rows
+)
+
+SELECT
+  * EXCEPT(event_row_num)
+
+FROM deduplicated_events
+
+-- Return exactly one row for each EVENTNAME.
+WHERE event_row_num = 1
+
+ORDER BY
+  CALLTIME,
+  EVENTNAME;
