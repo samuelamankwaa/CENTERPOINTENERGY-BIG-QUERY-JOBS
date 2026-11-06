@@ -1,0 +1,142 @@
+WITH order_base AS (
+  SELECT
+    A.OrderNumber,
+
+    DATE(
+      DATETIME(
+        A.OrderUpdateTS,
+        'America/Chicago'
+      )
+    ) AS Date,
+
+    CAST(
+      A.Tasks.WorkOrderTask.Activities.Activity.ActivityTracking.CompletedByUserId
+      AS STRING
+    ) AS CompletedByUserId
+
+  FROM `cnp-datafoundation-prod.EAI_ELEC_OPS.T_ELEC_ORDER_TASKS` AS A
+
+  WHERE A.OrderUpdateTS >= TIMESTAMP('2026-06-22')
+    AND A.OrderUpdateTS < TIMESTAMP('2026-06-29')
+
+    AND A.Tasks.WorkOrderTask.TaskTracking.CompletedAt.Value
+      IS NOT NULL
+
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY A.OrderNumber
+    ORDER BY A.OrderUpdateTS DESC
+  ) = 1
+),
+
+
+/* Get the latest technician/vendor information for each user ID. */
+lab_user AS (
+  SELECT
+    CAST(LOGON_ID AS STRING) AS LOGON_ID,
+    NAME,
+    UPDATE_STAMP
+
+  FROM `cnp-datafoundation-prod.TECHOPS_SERVICE_SUITE_HDB_TABLES.SS98HEOP_HDB_LAB_USER`
+
+  WHERE LOGON_ID IS NOT NULL
+
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY CAST(LOGON_ID AS STRING)
+    ORDER BY UPDATE_STAMP DESC
+  ) = 1
+),
+
+
+/* Add vendor code and vendor name. */
+order_with_vendor AS (
+  SELECT
+    ob.Date,
+    ob.CompletedByUserId,
+
+    REGEXP_EXTRACT(
+      TRIM(lu.NAME),
+      r'^([A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)*)-[^-]+,'
+    ) AS Vendor_Code,
+
+    CASE
+      WHEN REGEXP_EXTRACT(
+        TRIM(lu.NAME),
+        r'^([A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)*)-[^-]+,'
+      ) LIKE '%MPT%'
+        THEN 'MP Technologies'
+
+      WHEN REGEXP_EXTRACT(
+        TRIM(lu.NAME),
+        r'^([A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)*)-[^-]+,'
+      ) LIKE '%BTS%'
+        THEN 'Bright Star'
+
+      WHEN REGEXP_EXTRACT(
+        TRIM(lu.NAME),
+        r'^([A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)*)-[^-]+,'
+      ) LIKE '%FLP%'
+        THEN 'Frontline'
+
+      WHEN REGEXP_EXTRACT(
+        TRIM(lu.NAME),
+        r'^([A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)*)-[^-]+,'
+      ) LIKE '%LEM%'
+        THEN 'L.E. Myers'
+
+      WHEN REGEXP_EXTRACT(
+        TRIM(lu.NAME),
+        r'^([A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)*)-[^-]+,'
+      ) LIKE '%LP%'
+        THEN 'Line Pro'
+
+      WHEN REGEXP_EXTRACT(
+        TRIM(lu.NAME),
+        r'^([A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)*)-[^-]+,'
+      ) LIKE '%NHP%'
+        THEN 'North Houston'
+
+      WHEN REGEXP_EXTRACT(
+        TRIM(lu.NAME),
+        r'^([A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)*)-[^-]+,'
+      ) LIKE '%PWC%'
+        THEN 'PowerGrid'
+
+      ELSE REGEXP_EXTRACT(
+        TRIM(lu.NAME),
+        r'^([A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)*)-[^-]+,'
+      )
+    END AS Vendor_Name
+
+  FROM order_base AS ob
+
+  LEFT JOIN lab_user AS lu
+    ON TRIM(lu.LOGON_ID) = TRIM(ob.CompletedByUserId)
+
+  WHERE STARTS_WITH(
+    TRIM(ob.CompletedByUserId),
+    '009'
+  )
+)
+
+
+SELECT
+  Date,
+  Vendor_Code,
+  Vendor_Name,
+
+  COUNT(DISTINCT CompletedByUserId)
+    AS Number_of_Contractors_that_day
+
+FROM order_with_vendor
+
+WHERE Vendor_Code IS NOT NULL
+  AND Vendor_Name IS NOT NULL
+
+GROUP BY
+  Date,
+  Vendor_Code,
+  Vendor_Name
+
+ORDER BY
+  Date,
+  Vendor_Name;
